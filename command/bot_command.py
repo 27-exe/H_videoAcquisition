@@ -7,7 +7,7 @@ from spiders.hanime1.tasks import do_hanime1
 
 logger = logging.getLogger(__name__)
 
-async def register_order_handlers(client,db,ts:TaskManager):     #所有命令的列表
+async def register_order_handlers(client,ts:TaskManager):     #所有命令的列表
     logger.debug("命令捕获启动")
     cfg = load_json('bot_cfg.json')
 
