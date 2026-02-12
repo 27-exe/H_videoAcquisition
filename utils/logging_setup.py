@@ -76,7 +76,7 @@ def setup_logging(
     # 输出一条确认日志
     logging.getLogger(__name__).info(
         "异步日志系统已启动 | 文件: %s ",
-        log_file, backup_count
+        log_file
     )
 
 

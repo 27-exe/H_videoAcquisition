@@ -37,6 +37,8 @@ async def main():
 if __name__ == '__main__':
     try:
         asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n[!] 机器人已由用户手动停止")
     except Exception as e:
         logging.error(f"程序异常终止: {str(e)}", exc_info=True)
         exit(1)
