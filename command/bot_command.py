@@ -97,7 +97,7 @@ async def register_order_handlers(client,db,ts:TaskManager):     #所有命令�
             if event.sender_id == int(ADMIN_ID):
 
 
-                await event.reply('立即更新hanime1')
+                await event.reply('立即更新iwara')
         finally:
             raise StopPropagation
 
@@ -105,8 +105,8 @@ async def register_order_handlers(client,db,ts:TaskManager):     #所有命令�
     async def start_once(event):
         try:
             if event.sender_id == int(ADMIN_ID):
-                await do_hanime1(client,db)
                 await event.reply('立即更新hanime1')
+                await do_hanime1(client,db)
         finally:
             raise StopPropagation
 

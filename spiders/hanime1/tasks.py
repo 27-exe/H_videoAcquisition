@@ -26,6 +26,9 @@ async def do_hanime1(client,db:DataBase):
         ch_name = re.sub(r'^@', '', pic_ch)
         hm = Hanime1spider(cfg)
         spider:CrawlResult = await hm.do()
+        if not spider.success:
+            logger.warning('未能正确爬取')
+            return False
         data_list = spider.data
         name_list = [item[0] for item in data_list]
         source_url_list = [item[1] for item in data_list]

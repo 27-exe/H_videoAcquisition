@@ -1,6 +1,6 @@
 import asyncio,re,logging
 from lxml import html
-from utils.request_utils import creat_session,fetch,get_proxy
+from utils.request_utils import creat_session,fetch
 from utils.parse_utils import clean_filename,make_result
 from spiders.base_spider import BaseSpider, CrawlResult
 
@@ -40,52 +40,76 @@ class Hanime1spider(BaseSpider):
         return urls
 
     async def preprocess_response(self, urls:list) -> list | None:       #一次访问预处理拿到下载页面链接和标题
-        proxy = await get_proxy(self.proxy_url)
-        async with creat_session(header= self.headers,proxy= proxy) as session:
-            tasks = [fetch(session,url) for url in urls]
+        async with creat_session(header=self.headers) as session:
+            tasks = [fetch(session, url,proxy= self.proxy_url) for url in urls]
             results = await asyncio.gather(*tasks, return_exceptions=True)
-        processed =  make_result(urls, results)
+
+        processed = make_result(urls, results)
         detail_msg = []
+
         try:
-            for hl in processed:
-                if hl["status"] == "success":
-                    _html = hl["content"]
+            if not processed:
+                logger.warning("未能获取到任何页面结果")
+                return None
+
+            for data in processed.values():
+                if isinstance(data, dict) and data.get("status") == "success":
+                    _html = data["content"]
+                    if not _html: continue
+
                     tree = html.fromstring(_html)
-                    for i in range(30,0,-1):       #仅爬取30个视频,倒序
-                        detail = []
-                        video_url = tree.xpath(f"//*[@id='home-rows-wrapper']/div[3]/div/div/div[{i}]/div/a/@href")
-                        video_name = tree.xpath(f"//*[@id='home-rows-wrapper']/div[3]/div/div/div[{i}]/@title")
-                        detail.append(clean_filename(video_name))
-                        detail.append(video_url)
-                        detail_msg.append(detail)
-                        logging.debug(f'完成top{i}的爬取')
+                    for i in range(30, 0, -1):
+                        video_urls = tree.xpath(f"//*[@id='home-rows-wrapper']/div[3]/div/div/div[{i}]/div/a/@href")
+                        video_names = tree.xpath(f"//*[@id='home-rows-wrapper']/div[3]/div/div/div[{i}]/@title")
+
+                        if video_urls and video_names:
+                            # 提取字符串
+                            v_url = video_urls[0]
+                            v_name = clean_filename(video_names[0])
+
+
+                            detail_msg.append([v_name, v_url])
+                            logger.debug(f'完成top{i}的爬取: {v_name}')
+                elif data.get("status") == "error":
+                    logger.warning(f'访问页面失败!{data["content"]}')
+                    raise Exception(f"Request failed: {data['content']}")
+                else:
+                    logger.warning(f"跳过无效数据 (类型: {type(data)}): {data}")
+
             return detail_msg
+
         except Exception as e:
             self.error = e
-            logger.error(f'获取视频详细时出错{e}',exc_info=True)
+            logger.error(f'获取视频详细时出错: {e}', exc_info=True)
             self.success = False
+            return []  # 出错返回空列表而不是 None，防止后续 crash
 
-
-    async def parse(self, detail_msg:list):
-
+    async def parse(self, detail_msg: list):
         post_url = []
         download_urls = []
-        for i in detail_msg:
-            id_match = re.search(r"\?v=(\d+)", i)
+
+        for item in detail_msg:
+            if not item or len(item) < 2:
+                continue
+
+            # 取出 url 字符串 (item[1])
+            video_url_str = item[1]
+            id_match = re.search(r"\?v=(\d+)", video_url_str)
+
             if id_match:
-               url = "https://hanime1.me/download?v=" + id_match.group(1)
-               post_url.append(url)
+                url = "https://hanime1.me/download?v=" + id_match.group(1)
+                post_url.append(url)
             else:
-                logger.warning(f"从页面中提取视频id失败,可能链接发生更改 {i}")
+                logger.warning(f"提取视频ID失败: {video_url_str}")
                 self.success = False
                 post_url.append("")
+
 
         for j in range(0,30,5):
             cycle_urls = post_url[j:j+5]
             try:
-                proxy = await get_proxy(self.proxy_url)
-                async with creat_session(header= self.headers,proxy= proxy) as session:
-                    tasks = [fetch(session,url) for url in cycle_urls]
+                async with creat_session(header= self.headers) as session:
+                    tasks = [fetch(session,url,proxy= self.proxy_url) for url in cycle_urls]
                     results = await asyncio.gather(*tasks, return_exceptions=True)
                     processed =  make_result(cycle_urls, results)
                 for dn in processed:
