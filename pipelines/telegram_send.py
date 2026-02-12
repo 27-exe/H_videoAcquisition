@@ -7,6 +7,8 @@ logger = logging.getLogger(__name__)
 
 async def send_source_video(client,title,path,ch_id):        #接受消息client,标题,发送日期,视频路径.返回值为发送目标频道的消息id,不包含频道用户名
     try:
+        if path == 0:
+            return 0
         video_file = await fast_upload(client,path,name=title)
         cap = f'日期:{datetime.now(timezone(timedelta(hours=8))).date().isoformat()}\n标题:{title}'
 
@@ -20,7 +22,7 @@ async def send_source_video(client,title,path,ch_id):        #接受消息client
         logger.error(f"发送视频时出错: {str(e)}")
     finally:
         # 清理本地图片文件
-        if path:  # 显式检查paths 非空
+        if path !=0:  # 显式检查paths 非空
             logger.debug("开始清理文件")
             try:
                 if os.path.exists(path):

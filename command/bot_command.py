@@ -7,7 +7,7 @@ from spiders.hanime1.tasks import do_hanime1
 
 logger = logging.getLogger(__name__)
 
-async def register_order_handlers(client,ts:TaskManager):     #所有命令的列表
+async def register_order_handlers(client,db,ts:TaskManager):     #所有命令的列表
     logger.debug("命令捕获启动")
     cfg = load_json('bot_cfg.json')
 
@@ -105,7 +105,7 @@ async def register_order_handlers(client,ts:TaskManager):     #所有命令的�
     async def start_once(event):
         try:
             if event.sender_id == int(ADMIN_ID):
-                await do_hanime1(client)
+                await do_hanime1(client,db)
                 await event.reply('立即更新hanime1')
         finally:
             raise StopPropagation

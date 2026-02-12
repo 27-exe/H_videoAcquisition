@@ -228,6 +228,8 @@ def stitch_cover(count,thumb_path,cover_path):
 
 
 async def generate_thumbnail(t_video_path: str, thumb_path: str,cover_path, vid_id,num, today, clean_name):
+    if t_video_path == 0:
+        return False
     # 1. 创建唯一的临时工作目录，彻底避免并发冲突
     job_id = uuid.uuid4().hex
     temp_dir = Path("temp") / f"thumb_{job_id}"

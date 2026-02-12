@@ -80,19 +80,19 @@ class DataBase:
                 logger.error(f"写入 Iwara 数据库失败: {e}")
 
     async def get_iwara_info(self, video_url: str):
-        """根据 URL 查询 Iwara 信息，返回 (cover_path, title) 或 None"""
+        """根据 URL 查询 Iwara 信息，返回 (cover_path, title) 或 0"""
         await self.ensure_initialized()
         try:
             async with aiosqlite.connect(self.db_file) as conn:
                 async with conn.execute(
-                    "SELECT cover_path, title FROM iwara_info WHERE video_url = ?",
-                    (video_url,)
+                        "SELECT cover_path, title FROM iwara_info WHERE video_url = ?",
+                        (video_url,)
                 ) as cursor:
-                    return await cursor.fetchone()
+                    result = await cursor.fetchone()
+                    return result if result is not None else 0
         except Exception as e:
             logger.error(f"查询 Iwara 数据库失败: {e}")
-            return None
-
+            return 0
     # --- Hanime1 表操作 ---
 
     async def insert_hanime1_info(self, video_id: int, cover_path: str, title: str):
@@ -111,15 +111,16 @@ class DataBase:
                 logger.error(f"写入 Hanime1 数据库失败: {e}")
 
     async def get_hanime1_info(self, video_id: int):
-        """根据 ID 查询 Hanime1 信息，返回 (cover_path, title) 或 None"""
+        """根据 ID 查询 Hanime1 信息，返回 (cover_path, title) 或 0"""
         await self.ensure_initialized()
         try:
             async with aiosqlite.connect(self.db_file) as conn:
                 async with conn.execute(
-                    "SELECT cover_path, title FROM hanime1_info WHERE video_id = ?",
-                    (video_id,)
+                        "SELECT cover_path, title FROM hanime1_info WHERE video_id = ?",
+                        (video_id,)
                 ) as cursor:
-                    return await cursor.fetchone()
+                    result = await cursor.fetchone()
+                    return result if result is not None else 0
         except Exception as e:
             logger.error(f"查询 Hanime1 数据库失败: {e}")
-            return None
+            return 0

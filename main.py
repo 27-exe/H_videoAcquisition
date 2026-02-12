@@ -21,9 +21,10 @@ async def main():
         client = TelegramClient('bot', api_id, api_hash)
         await client.start(bot_token=bot_token)
         logger.info("机器人已成功启动并运行")
-        ts = TaskManager(client)
-        bs = DataBase()
-        await register_order_handlers(client,bs,ts)
+
+        db = DataBase()
+        ts = TaskManager(client,db)
+        await register_order_handlers(client,db,ts)
 
         await client.run_until_disconnected()
         ts.shutdown()

@@ -20,6 +20,8 @@ async def aria2_session(uri: str, token: str):
             logger.debug("Aria2 会话已关闭")
 
 async def _single_download(aria, url: str, dst: str, video_name: str):
+    if url == 0 :
+        return 0
     options = {
         "dir": os.path.dirname(dst),
         "out": os.path.basename(dst),

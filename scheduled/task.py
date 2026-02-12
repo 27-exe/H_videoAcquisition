@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 #    )
 
 
-def add_hanime1(scheduler: AsyncIOScheduler,client) -> Job:
+def add_hanime1(scheduler: AsyncIOScheduler,client,db) -> Job:
     """加入每隔一天 16:00 的 hanime1 爬虫"""
 
     tz = ZoneInfo("Asia/Shanghai")
@@ -34,7 +34,7 @@ def add_hanime1(scheduler: AsyncIOScheduler,client) -> Job:
         next_16 += timedelta(days=1)
 
     return scheduler.add_job(
-        do_hanime1(client),
+        do_hanime1(client,db),
         trigger=IntervalTrigger(
             days=2,
             start_date=next_16,
@@ -51,12 +51,13 @@ class TaskManager:
     """
     只负责调度控制：启动 / 暂停 / 立即执行一次
     """
-    def __init__(self,client):
+    def __init__(self,client,db):
         self.scheduler = AsyncIOScheduler(timezone=ZoneInfo("Asia/Shanghai"))
         self.scheduler_started = False
         #self.iwara: Job | None = None
         self.hanime1: Job | None = None
         self.client = client
+        self.db = db
 
 
     def start_all(self):
@@ -104,20 +105,6 @@ class TaskManager:
 
 
 
-    async def run_iwara_once(self):
-        logger.info("立即手動執行 iwara 一次")
-        try:
-            pass
-        except Exception as e:
-            logger.exception("iwara 手动运行失败")
-
-
-    async def run_hanime1_once(self):
-        logger.info("立即运行 hanime1 一次")
-        try:
-            await do_hanime1(self.client)
-        except Exception as e:
-            logger.exception("job2 手动运行失败")
 
 
     def shutdown(self):

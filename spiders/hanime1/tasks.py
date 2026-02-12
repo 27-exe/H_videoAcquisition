@@ -6,6 +6,7 @@ from pipelines.load import load_yaml
 from spiders.base_spider import CrawlResult
 from utils.pic_utils import generate_thumbnail
 from datetime import datetime, timezone, timedelta
+from pipelines.data_base import DataBase
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,7 @@ preview_path = os.path.join(spider_path, "preview")
 
 
 
-async def do_hanime1(client):
+async def do_hanime1(client,db:DataBase):
     try:
         cfg = load_yaml('hanime1.yaml')
         video_ch = cfg['video_channel']
@@ -34,11 +35,13 @@ async def do_hanime1(client):
             if match:
                 id_lists.append(int(match.group(1)))
         for i in range(0, 30, 5):
-            download_list = spider.detail[i:i+5]
             na_list = name_list[i:i+5]
             url_list = source_url_list[i:i+5]
             id_list = id_lists[i:i+5]
-            video_paths =  await start_batch_download(download_list,video_path,na_list)
+            need_down_list = await if_exit(id_list,db)
+            down_url_list = [val_b if val_a != 0 else 0 for val_a, val_b in zip(need_down_list, spider.detail[i:i+5])]
+
+            video_paths =  await start_batch_download(down_url_list,video_path,na_list)
 
             send_source_list = [send_source_video(client=client,title= ti,path= vid_path,ch_id = video_ch)for ti,vid_path in zip(id_list,video_paths)]
             send_source_task= asyncio.gather(*send_source_list)
@@ -58,5 +61,17 @@ async def do_hanime1(client):
         await send_top5(client,ch_id=pic_ch,ranks=rank_list,source='hanime1',paths=cover_paths)
     except Exception as e:
         logger.error(e)
+
+
+async def if_exit(id_list,db:DataBase):
+    download_lists = []
+    find_task = [db.get_hanime1_info(vid_id) for vid_id in id_list]
+    find = await asyncio.gather(*find_task)
+    for i,vid_id in enumerate(find):
+        if vid_id == 0: #不存在,原样
+            download_lists.append(id_list[i])
+        else:       #存在,置0
+            download_lists.append(0)
+    return download_lists
 
 
