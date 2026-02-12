@@ -3,6 +3,7 @@ from telethon import events
 from telethon.events import StopPropagation
 from pipelines.load import load_json
 from scheduled.task import TaskManager
+from spiders.hanime1.tasks import do_hanime1
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,7 @@ async def register_order_handlers(client,db,ts:TaskManager):     #所有命令�
     async def start_once(event):
         try:
             if event.sender_id == int(ADMIN_ID):
-
+                await do_hanime1(client)
                 await event.reply('立即更新hanime1')
         finally:
             raise StopPropagation
