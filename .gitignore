@@ -1,0 +1,13 @@
+__pycache__/
+*.log
+*.session
+*.db
+*.sqlite
+.idea
+*.exe
+.venv
+config/token.json
+config/aria2.json
+config/bot_cfg.json
+config/hanime1.yaml
+*.token.json

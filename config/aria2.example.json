@@ -1,0 +1,4 @@
+{
+    "rpc_url": "http://localhost:6800/jsonrpc",
+    "rpc_token": "你的_aria2_密钥"
+}
