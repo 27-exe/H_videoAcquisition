@@ -7,7 +7,7 @@ from pipelines.data_base import DataBase
 from scheduled.task import TaskManager
 
 
-setup_logging(log_file='bot.log',level=logging.INFO)
+setup_logging(log_file='bot.log',level=logging.DEBUG)
 
 async def main():
     logger = logging.getLogger(__name__)

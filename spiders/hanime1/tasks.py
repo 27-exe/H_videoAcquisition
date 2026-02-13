@@ -25,7 +25,7 @@ async def do_hanime1(client,db:DataBase):
         pic_ch = cfg['pic_channel']
         ch_name = re.sub(r'^@', '', pic_ch)
         hm = Hanime1spider(cfg)
-        spider:CrawlResult = await hm.do()
+        spider:CrawlResult = await hm.do_job()
         if not spider.success:
             logger.warning('未能正确爬取')
             return False

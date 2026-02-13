@@ -1,6 +1,6 @@
 import asyncio,re,logging
 from lxml import html
-from utils.request_utils import creat_session,fetch
+from utils.request_utils import fuck_cf
 from utils.parse_utils import clean_filename,make_result
 from spiders.base_spider import BaseSpider, CrawlResult
 
@@ -30,8 +30,8 @@ class Hanime1spider(BaseSpider):
 
     def start_requests(self):
         if not self.base_url:
+            self.success = False
             raise ValueError("传入的值不能为空")
-        self.success = False
         urls = []
         for page in range(1, self.page + 1):
             url = self.base_url + f"search?genre={self.keywords}&sort=%E6%9C%AC%E6%97%A5%E6%8E%92%E8%A1%8C&page={self.page}"
@@ -40,9 +40,8 @@ class Hanime1spider(BaseSpider):
         return urls
 
     async def preprocess_response(self, urls:list) -> list | None:       #一次访问预处理拿到下载页面链接和标题
-        async with creat_session(header=self.headers) as session:
-            tasks = [fetch(session, url,proxy= self.proxy_url) for url in urls]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+        # 有 CF
+        results = await fuck_cf(urls)
 
         processed = make_result(urls, results)
         detail_msg = []
@@ -108,11 +107,9 @@ class Hanime1spider(BaseSpider):
         for j in range(0,30,5):
             cycle_urls = post_url[j:j+5]
             try:
-                async with creat_session(header= self.headers) as session:
-                    tasks = [fetch(session,url,proxy= self.proxy_url) for url in cycle_urls]
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
-                    processed =  make_result(cycle_urls, results)
-                for dn in processed:
+                results = await fuck_cf(cycle_urls)
+                processed =  make_result(cycle_urls, results)
+                for dn in processed.values():
                     if dn["status"] == "success":
                         _html = dn["content"]
                         tree = html.fromstring(_html)
@@ -143,8 +140,11 @@ class Hanime1spider(BaseSpider):
             pages_count=len(post_url)
         )
 
-    async def do(self):
+    async def do_job(self):
+
         url = self.start_requests()
+
         dig = await self.preprocess_response(url)
+
         res = await self.parse(dig)
         return res

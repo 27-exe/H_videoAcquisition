@@ -59,7 +59,7 @@ def setup_logging(
     # 降低常见第三方库的日志噪音
     noisy_modules = [
         'telethon', 'aiosqlite', 'apscheduler',
-        'aiohttp', 'playwright', 'urllib3', 'asyncio'
+        'aiohttp', 'playwright', 'urllib3', 'asyncio','playwright_captcha'
     ]
     for mod in noisy_modules:
         logging.getLogger(mod).setLevel(logging.WARNING)
