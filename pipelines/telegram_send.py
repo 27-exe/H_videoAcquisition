@@ -5,31 +5,48 @@ from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 
-async def send_source_video(client,title,path,ch_id):        #接受消息client,标题,发送日期,视频路径.返回值为发送目标频道的消息id,不包含频道用户名
+async def send_source_video(client, title, path, ch_id, semaphore=None):  # 新增 semaphore 参数
     try:
         if path == 0:
             return 0
-        video_file = await fast_upload(client,path,name=title)
+        video_file = await fast_upload(client, path, name=title)
         cap = f'日期:{datetime.now(timezone(timedelta(hours=8))).date().isoformat()}\n标题:{title}'
 
-        vid_msg = await client.send_message(f'{ch_id}',file= video_file,caption=cap,supports_streaming = True,force_document=False)
+        # 用信号量包裹发送（如果传了 semaphore）
+        if semaphore:
+            async with semaphore:
+                vid_msg = await client.send_message(
+                    f'{ch_id}',
+                    file=video_file,
+                    caption=cap,
+                    supports_streaming=True,
+                    force_document=False
+                )
+        else:
+            vid_msg = await client.send_message(
+                f'{ch_id}',
+                file=video_file,
+                caption=cap,
+                supports_streaming=True,
+                force_document=False
+            )
+
         logger.debug(f'发送视频{title}到频道成功')
-
         vid_id = vid_msg.id
-
         return vid_id
+
     except Exception as e:
         logger.error(f"发送视频时出错: {str(e)}")
+        return 0
     finally:
-        # 清理本地图片文件
-        if path !=0:  # 显式检查paths 非空
+        if path != 0:
             logger.debug("开始清理文件")
             try:
                 if os.path.exists(path):
                     os.remove(path)
                     logger.debug(f"删除文件{path}")
-            except FileNotFoundError as e:
-                logger.error(f"Error deleting directory {path}: {e}")
+            except Exception as e:
+                logger.error(f"删除文件失败 {path}: {e}")
 
 
 async def send_video(client,title,video_id,url,top,path,channel_id,ch_name):

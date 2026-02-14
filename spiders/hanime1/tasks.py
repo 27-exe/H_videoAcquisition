@@ -29,6 +29,7 @@ async def do_hanime1(client,db:DataBase):
         if not spider.success:
             logger.warning('未能正确爬取')
             return False
+        send_semaphore = asyncio.Semaphore(1)
         data_list = spider.data
         name_list = [item[0] for item in data_list]
         source_url_list = [item[1] for item in data_list]
@@ -42,21 +43,21 @@ async def do_hanime1(client,db:DataBase):
             url_list = source_url_list[i:i+5]
             id_list = id_lists[i:i+5]
             need_down_list = await if_exit(id_list,db)
-            down_url_list = [val_b if val_a != 0 else 0 for val_a, val_b in zip(need_down_list, spider.detail[i:i+5])]
+            down_url_list = [val_b if val_a != 0 else 0 for val_a, val_b in zip(need_down_list, [x[0] for x in spider.detail[i:i+5]])]
 
             video_paths =  await start_batch_download(down_url_list,video_path,na_list)
 
-            send_source_list = [send_source_video(client=client,title= ti,path= vid_path,ch_id = video_ch)for ti,vid_path in zip(id_list,video_paths)]
+            send_source_list = [send_source_video(client=client,title= ti,path= vid_path,ch_id = video_ch,semaphore=send_semaphore)for ti,vid_path in zip(id_list,video_paths)]
             send_source_task= asyncio.gather(*send_source_list)
 
             date = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
-            pic_list = [generate_thumbnail(t_video_path = vi_paths,thumb_path=preview_path,cover_path= cover_path,vid_id=vid,num= top,today=date,clean_name=na_list)for vi_paths,vid,top in zip(video_paths,id_list,range(30-i,24-i,-1))]
+            pic_list = [generate_thumbnail(t_video_path = vi_paths,thumb_path=preview_path,cover_path= cover_path,vid_id=vid,num= top,today=date,clean_name=na_ls)for vi_paths,vid,top,na_ls in zip(video_paths,id_list,range(30-i,24-i,-1),na_list)]
             pic_task =  asyncio.gather(*pic_list)
 
             task_list = [send_source_task,pic_task]
             await asyncio.gather(*task_list)
             prv_path =[os.path.join(preview_path,video_id)for video_id in id_list]
-            send_pre_task = [send_video(client=client,video_id=vid,url=urls,top = num,path=prv_path,channel_id=video_ch,title=tit,ch_name=ch_name)for vid,urls,num,tit in zip(id_list,url_list,range(30-i,24-i,-1),na_list)]
+            send_pre_task = [send_video(client=client,video_id=vid,url=urls,top = num,path=prv_pa,channel_id=video_ch,title=tit,ch_name=ch_name)for vid,urls,num,prv_pa,tit in zip(id_list,url_list,range(30-i,24-i,-1),prv_path,na_list)]
             await asyncio.gather(*send_pre_task)
 
         rank_list = [f'https://t.me/{ch_name}/{video_id}'for video_id in id_lists[25:29]][::-1]

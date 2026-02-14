@@ -22,7 +22,7 @@ async def generate_single_thumbnail_async(t_video_path: str, cover_path: str):
     # 使用异步子进程
     cmd = [
         'ffmpeg', '-ss', '12', '-i', t_video_path,
-        '-vframes', '1', '-q:v', '2', '-y', cover_path
+        '-frames:v', '1', '-q:v', '2', '-y', cover_path
     ]
 
     returncode, _, stderr = await run_command(cmd)
@@ -65,7 +65,7 @@ async def extract_frame_async(video_path, timestamp, output_path):
     """异步抽取单帧"""
     cmd = [
         'ffmpeg', '-ss', str(timestamp), '-i', video_path,
-        '-vframes', '1', '-q:v', '2', '-y', output_path
+        '-frames:v', '1', '-q:v', '2', '-y', output_path
     ]
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
@@ -212,19 +212,36 @@ def _draw_logic_sync(frames, thumb_path, is_vertical, info_dict):
     return thumb_path
 
 
-def stitch_cover(count,thumb_path,cover_path):
-    #拼接图片
-    pic = [thumb_path,cover_path]
-    if count == 7:
-        canvas_w, canvas_h = 3960, 2160
-        canvas = Image.new('RGB', (canvas_w, canvas_h), (255, 255, 255))
-        # 坐标（横屏）
-        positions = [(0,0),(0,1080)]
+def stitch_cover(count, thumb_path, cover_path):
+    try:
+        thumb_img = Image.open(thumb_path)
+        cover_img = Image.open(cover_path)
+        if count == 7:
+            # 上下拼接
+            canvas = Image.new('RGB', (1920, 2160), (255, 255, 255))  # 调整宽度
+            positions = [(0, 0), (0, 1080)]
 
-        # 粘贴帧
-        for (x, y), fp in zip(positions, pic):
-            canvas.paste(fp, (x, y))
-        canvas.save(thumb_path, 'JPEG', quality=85)
+            images = [thumb_img, cover_img]
+            for (x, y), im in zip(positions, images):
+                canvas.paste(im, (x, y))
+
+            canvas.save(thumb_path, 'JPEG', quality=85)
+        elif count == 4:#左右拼接
+            canvas = Image.new('RGB', (2160, 1920), (255, 255, 255))  # 调整宽度
+            positions = [(0, 0), (1080,0)]
+
+            images = [thumb_img, cover_img]
+            for (x, y), im in zip(positions, images):
+                canvas.paste(im, (x, y))
+    except Exception as e:
+        logger.error(f"stitch_cover 拼接失败: {e}")
+    finally:
+        # 关闭图像，释放内存
+        try:
+            thumb_img.close()
+            cover_img.close()
+        except:
+            pass
 
 
 async def generate_thumbnail(t_video_path: str, thumb_path: str,cover_path, vid_id,num, today, clean_name):
@@ -236,6 +253,8 @@ async def generate_thumbnail(t_video_path: str, thumb_path: str,cover_path, vid_
     temp_dir.mkdir(exist_ok=True)
     thumb_id = os.path.join(thumb_path, f"{vid_id}.jpg")
     cover_id = os.path.join(cover_path, f"{vid_id}.jpg")
+    os.makedirs(thumb_path, exist_ok=True)
+    os.makedirs(cover_path, exist_ok=True)
 
     try:
         # 2. 异步获取视频信息
@@ -261,7 +280,7 @@ async def generate_thumbnail(t_video_path: str, thumb_path: str,cover_path, vid_
         if len(valid_frames) < count:
             return None
         # 6. 抽取单张封面
-        await generate_single_thumbnail_async(thumb_id,cover_id)
+        await generate_single_thumbnail_async(t_video_path,cover_id)
         # 7. 将图片合成任务丢入线程池，避免阻塞主事件循环
         loop = asyncio.get_running_loop()
         info_dict = {"num": num, "today": today, "name": clean_name,"str":duration_str}
