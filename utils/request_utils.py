@@ -135,7 +135,7 @@ async def fuck_cf(urls: str | list[str], proxy: Optional[str] = None):
 
                     # 错误截图
                     timestamp = int(time.time())
-                    screenshot_path = f"screenshots/error_global_{i}_{timestamp}.png"
+                    screenshot_path = f"error_shot/error_global_{i}_{timestamp}.png"
                     try:
                         await page.screenshot(path=screenshot_path)
                     except:
