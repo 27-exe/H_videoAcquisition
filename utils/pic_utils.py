@@ -17,23 +17,50 @@ async def run_command(cmd):
 
 async def generate_single_thumbnail_async(t_video_path: str, cover_path: str):
     """
-    单张12s处封面生成
+    单张7s处封面生成
     """
     # 使用异步子进程
     cmd = [
-        'ffmpeg', '-ss', '12', '-i', t_video_path,
+        'ffmpeg', '-ss', '7', '-i', t_video_path,
         '-frames:v', '1', '-q:v', '2', '-y', cover_path
     ]
 
     returncode, _, stderr = await run_command(cmd)
 
     if returncode == 0 and os.path.exists(cover_path):
-        logger.debug(f"异步生成封面成功: {cover_path}")
+        logger.debug(f"生成封面成功: {cover_path}")
         return cover_path
     else:
         logger.error(f"FFmpeg 失败: {stderr}")
         return None
 
+
+async def generate_mini_thumb_async(input_path: str, output_path: str):
+    """
+    使用 FFmpeg 生成 Telegram 要求的 320px 缩略图
+    User for: InputMediaUploadedDocument(thumb=...)
+    """
+    if not os.path.exists(input_path):
+        return False
+
+    # scale逻辑: 如果宽>高(横屏),宽=320,高自适应; 否则(竖屏),高=320,宽自适应
+    vf_scale = "scale='if(gt(iw,ih),320,-1)':'if(gt(iw,ih),-1,320)'"
+
+    cmd = [
+        'ffmpeg', '-y', '-i', input_path,
+        '-vf', vf_scale,
+        '-q:v', '1',  # 质量 1 (1-31, 1为最高质量，因为图很小所以可以用高质量)
+        output_path
+    ]
+
+    returncode, _, stderr = await run_command(cmd)
+
+    if returncode == 0 and os.path.exists(output_path):
+        # logger.debug(f"生成320px缩略图成功: {output_path}")
+        return True
+    else:
+        logger.error(f"生成缩略图失败: {stderr}")
+        return False
 
 async def get_video_info_async(video_path: str):
     """异步获取视频信息"""
@@ -246,13 +273,15 @@ def stitch_cover(count, thumb_path, cover_path):
 
 async def generate_thumbnail(t_video_path: str, thumb_path: str,cover_path, vid_id,num, today, clean_name):
     if t_video_path == 0:
-        return False
+        return 0
     # 1. 创建唯一的临时工作目录，彻底避免并发冲突
     job_id = uuid.uuid4().hex
     temp_dir = Path("temp") / f"thumb_{job_id}"
-    temp_dir.mkdir(exist_ok=True)
+    temp_dir.mkdir(parents=True,exist_ok=True)
     thumb_id = os.path.join(thumb_path, f"{vid_id}.jpg")
     cover_id = os.path.join(cover_path, f"{vid_id}.jpg")
+    mini_thumb_id = os.path.join(cover_path, f"{vid_id}_thumb.jpg")
+
     os.makedirs(thumb_path, exist_ok=True)
     os.makedirs(cover_path, exist_ok=True)
 
@@ -281,6 +310,11 @@ async def generate_thumbnail(t_video_path: str, thumb_path: str,cover_path, vid_
             return None
         # 6. 抽取单张封面
         await generate_single_thumbnail_async(t_video_path,cover_id)
+
+        if os.path.exists(cover_id):
+            await generate_mini_thumb_async(cover_id, mini_thumb_id)
+
+
         # 7. 将图片合成任务丢入线程池，避免阻塞主事件循环
         loop = asyncio.get_running_loop()
         info_dict = {"num": num, "today": today, "name": clean_name,"str":duration_str}

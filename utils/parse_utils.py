@@ -28,16 +28,18 @@ def clean_filename(name: str) -> str:
     return cleaned[:200]
 
 def make_result(urls,results):
-    processed = {}
+    processed = []
     for url, result in zip(urls, results):
-        if isinstance(result, Exception):
-            processed[url] = {
+        if url == 0 or result == 0:
+            processed.append(0)
+        elif isinstance(result, Exception):
+            processed.append({
                 "status": "error",
                 "content": str(result) + type(result).__name__
-            }
+            })
         else:
-            processed[url] = {
+            processed.append(  {
                 "status": "success",
                 "content": result
-            }
+            })
     return processed

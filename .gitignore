@@ -11,3 +11,4 @@ config/aria2.json
 config/bot_cfg.json
 config/hanime1.yaml
 *.token.json
+download/

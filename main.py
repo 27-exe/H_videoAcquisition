@@ -7,9 +7,10 @@ from pipelines.data_base import DataBase
 from scheduled.task import TaskManager
 
 
-setup_logging(log_file='bot.log',level=logging.DEBUG)
+setup_logging(log_file='bot.log',level=logging.INFO)
 
 async def main():
+    ts = None
     logger = logging.getLogger(__name__)
     logger.info("正在启动机器人...")
     try:
@@ -27,19 +28,21 @@ async def main():
         await register_order_handlers(client,db,ts)
 
         await client.run_until_disconnected()
-        ts.shutdown()
+
 
     except Exception as ex:
         logger.error(f"机器人运行出错: {str(ex)}", exc_info=True)
         raise
     finally:
         logger.info("正在关闭机器人...")
+        if ts :
+            ts.shutdown()
 
 if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n[!] 机器人已由用户手动停止")
+        logging.info("\n[!] 机器人已由用户手动停止")
     except Exception as e:
         logging.error(f"程序异常终止: {str(e)}", exc_info=True)
         exit(1)

@@ -110,7 +110,7 @@ async def register_order_handlers(client,db,ts:TaskManager):     #所有命令�
         finally:
             raise StopPropagation
 
-    @client.on(events.NewMessage(pattern='/bye27'))
+    @client.on(events.NewMessage(pattern='/bye'))
     async def stop_bot(event):
         # 仅允许特定用户（例如机器人管理员）执行关闭命令
         # 替换 YOUR_ADMIN_ID 为管理员的 Telegram 用户 ID

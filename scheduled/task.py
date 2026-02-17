@@ -1,7 +1,5 @@
 import logging
 from zoneinfo import ZoneInfo
-
-from apscheduler.triggers.cron import CronTrigger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.job import Job
@@ -34,7 +32,8 @@ def add_hanime1(scheduler: AsyncIOScheduler,client,db) -> Job:
         next_16 += timedelta(days=1)
 
     return scheduler.add_job(
-        do_hanime1(client,db),
+        do_hanime1,
+        args=(client, db),
         trigger=IntervalTrigger(
             days=2,
             start_date=next_16,
@@ -67,7 +66,7 @@ class TaskManager:
             return
 
         #self.iwara = add_iwara(self.scheduler)
-        self.hanime1 = add_hanime1(self.scheduler,self.client)
+        self.hanime1 = add_hanime1(self.scheduler,self.client,self.db)
 
         self.scheduler.start()
         self.scheduler_started = True

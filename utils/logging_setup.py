@@ -59,10 +59,21 @@ def setup_logging(
     # 降低常见第三方库的日志噪音
     noisy_modules = [
         'telethon', 'aiosqlite', 'apscheduler',
-        'aiohttp', 'playwright', 'urllib3', 'asyncio','playwright_captcha'
+        'aiohttp', 'playwright', 'urllib3', 'asyncio'
     ]
     for mod in noisy_modules:
         logging.getLogger(mod).setLevel(logging.WARNING)
+    silenced_modules = [
+        'playwright_captcha',
+        'playwright_captcha.solvers.base_solver',
+        'playwright_captcha.solvers.click.click_solver'
+    ]
+
+    for mod in silenced_modules:
+        l = logging.getLogger(mod)
+        l.setLevel(logging.CRITICAL)  # 只有 CRITICAL 级别才能通过（屏蔽 ERROR）
+        l.propagate = False  # 禁止向上传播给 root logger (关键)
+        l.handlers = []  # 清空它可能自带的 handler
 
     # 注册程序退出时自动停止 listener（防止警告或资源泄漏）
     def stop_listener():

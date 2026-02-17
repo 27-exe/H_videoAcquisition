@@ -3,8 +3,22 @@ from lxml import html
 from utils.request_utils import fuck_cf
 from utils.parse_utils import clean_filename,make_result
 from spiders.base_spider import BaseSpider, CrawlResult
+from pipelines.data_base import DataBase
 
 logger = logging.getLogger(__name__)
+
+async def if_exit(id_list,db:DataBase):
+    download_lists = []
+    find_task = [db.get_hanime1_info(vid_id) for vid_id in id_list]
+    find = await asyncio.gather(*find_task)
+    for i,vid_id in enumerate(find):
+        if vid_id == 0: #不存在,原样
+            download_lists.append(id_list[i])
+        else:       #存在,置0
+            download_lists.append(0)
+    return download_lists
+
+
 
 
 class Hanime1spider(BaseSpider):
@@ -17,7 +31,7 @@ class Hanime1spider(BaseSpider):
     run_interval_days = 3
     success = True
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict,db:DataBase):
         super().__init__(config)
         self.config = config
         self.name = config.get("name", "未命名爬虫")
@@ -27,6 +41,7 @@ class Hanime1spider(BaseSpider):
         self.page = config.get("page", 1)
         self.proxy_url = config.get("proxy_url", None)  if self.enable_proxy else None
         self.error = None
+        self.db = db
 
     def start_requests(self):
         if not self.base_url:
@@ -51,7 +66,8 @@ class Hanime1spider(BaseSpider):
                 logger.warning("未能获取到任何页面结果")
                 return None
 
-            for data in processed.values():
+            for data in processed:
+                if data == 0: continue  # 跳过占位符
                 if isinstance(data, dict) and data.get("status") == "success":
                     _html = data["content"]
                     if not _html: continue
@@ -84,6 +100,7 @@ class Hanime1spider(BaseSpider):
             return []  # 出错返回空列表而不是 None，防止后续 crash
 
     async def parse(self, detail_msg: list):
+        id_list = []
         post_url = []
         download_urls = []
 
@@ -96,25 +113,48 @@ class Hanime1spider(BaseSpider):
             id_match = re.search(r"\?v=(\d+)", video_url_str)
 
             if id_match:
-                url = "https://hanime1.me/download?v=" + id_match.group(1)
-                post_url.append(url)
+                id_list.append(id_match.group(1))
             else:
                 logger.warning(f"提取视频ID失败: {video_url_str}")
                 self.success = False
-                post_url.append("")
-
+                post_url.append(0)
+        post_id =  await if_exit(id_list,self.db)
+        for v_id in post_id:
+            if v_id != 0:
+                url = "https://hanime1.me/download?v=" + v_id
+                post_url.append(url)
+            else:
+                post_url.append(0)
 
         for j in range(0,30,5):
             cycle_urls = post_url[j:j+5]
             try:
                 results = await fuck_cf(cycle_urls)
                 processed =  make_result(cycle_urls, results)
-                for dn in processed.values():
-                    if dn["status"] == "success":
+                for dn in processed:
+                    if dn  == 0:
+                        download_urls.append(0)
+                        continue
+                    if isinstance(dn, dict) and dn.get("status") == "success":
                         _html = dn["content"]
-                        tree = html.fromstring(_html)
-                        download_url = tree.xpath("//*[@id='content-div']/div[1]/div[4]/div/div/table/tbody/tr[2]/td[5]/a/@data-url")
-                        download_urls.append(download_url)
+                        try:
+                            tree = html.fromstring(_html)
+                            d_url_list = tree.xpath(
+                                "//*[@id='content-div']/div[1]/div[4]/div/div/table/tbody/tr[2]/td[5]/a/@data-url")
+
+                            if d_url_list:
+                                download_urls.append(d_url_list[0])
+                            else:
+                                # 就算请求成功了，但没提取到链接，也要占位！
+                                logger.warning("XPath 未找到下载链接")
+                                download_urls.append(0)
+                        except Exception:
+                            # 解析出错也要占位
+                            download_urls.append(0)
+                    else:
+                        # 请求失败也要占位
+                        download_urls.append(0)
+
                 await asyncio.sleep(6)
 
             except Exception as e:

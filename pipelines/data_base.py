@@ -44,16 +44,16 @@ class DataBase:
                     CREATE TABLE IF NOT EXISTS iwara_info
                     (
                         video_url TEXT PRIMARY KEY,
-                        cover_path TEXT,
-                        title TEXT
+                        title TEXT,
+                        ch_id INTEGER
                     )
                 """)
                 await conn.execute("""
                    CREATE TABLE IF NOT EXISTS hanime1_info
                    (
                         video_id INTEGER PRIMARY KEY,
-                        cover_path TEXT,
-                        title TEXT
+                        title TEXT,
+                        ch_id INTEGER
                    )
                    """)
                 await conn.commit()
@@ -64,15 +64,15 @@ class DataBase:
 
 # --- Iwara 表操作 ---
 
-    async def insert_iwara_info(self, video_url: str, cover_path: str, title: str):
+    async def insert_iwara_info(self, video_url: str, title: str):
         """插入或更新 Iwara 视频信息"""
         await self.ensure_initialized()
         async with self.edit_lock:
             try:
                 async with aiosqlite.connect(self.db_file) as conn:
                     await conn.execute(
-                        "INSERT OR REPLACE INTO iwara_info (video_url, cover_path, title) VALUES (?, ?, ?)",
-                        (video_url, cover_path, title)
+                        "INSERT OR REPLACE INTO iwara_info (video_url, title) VALUES (?, ?, ?)",
+                        (video_url, title)
                     )
                     await conn.commit()
                     logger.debug(f"Iwara 信息已存入数据库: {title}")
@@ -80,12 +80,12 @@ class DataBase:
                 logger.error(f"写入 Iwara 数据库失败: {e}")
 
     async def get_iwara_info(self, video_url: str):
-        """根据 URL 查询 Iwara 信息，返回 (cover_path, title) 或 0"""
+        """根据 URL 查询 Iwara 信息，返回 ( title) 或 0"""
         await self.ensure_initialized()
         try:
             async with aiosqlite.connect(self.db_file) as conn:
                 async with conn.execute(
-                        "SELECT cover_path, title FROM iwara_info WHERE video_url = ?",
+                        "SELECT title, ch_id FROM iwara_info WHERE video_url = ?",
                         (video_url,)
                 ) as cursor:
                     result = await cursor.fetchone()
@@ -95,15 +95,15 @@ class DataBase:
             return 0
     # --- Hanime1 表操作 ---
 
-    async def insert_hanime1_info(self, video_id: int, cover_path: str, title: str):
+    async def insert_hanime1_info(self, video_id: int, title: str,ch_id: int):
         """插入或更新 Hanime1 视频信息"""
         await self.ensure_initialized()
         async with self.edit_lock:
             try:
                 async with aiosqlite.connect(self.db_file) as conn:
                     await conn.execute(
-                        "INSERT OR REPLACE INTO hanime1_info (video_id, cover_path, title) VALUES (?, ?, ?)",
-                        (video_id, cover_path, title)
+                        "INSERT OR REPLACE INTO hanime1_info (video_id, title, ch_id) VALUES (?, ?, ?)",
+                        (video_id, title,ch_id)
                     )
                     await conn.commit()
                     logger.debug(f"Hanime1 信息已存入数据库: {title}")
@@ -111,12 +111,12 @@ class DataBase:
                 logger.error(f"写入 Hanime1 数据库失败: {e}")
 
     async def get_hanime1_info(self, video_id: int):
-        """根据 ID 查询 Hanime1 信息，返回 (cover_path, title) 或 0"""
+        """根据 ID 查询 Hanime1 信息，返回 ( title等) 或 0"""
         await self.ensure_initialized()
         try:
             async with aiosqlite.connect(self.db_file) as conn:
                 async with conn.execute(
-                        "SELECT cover_path, title FROM hanime1_info WHERE video_id = ?",
+                        "SELECT  title, ch_id FROM hanime1_info WHERE video_id = ?",
                         (video_id,)
                 ) as cursor:
                     result = await cursor.fetchone()
