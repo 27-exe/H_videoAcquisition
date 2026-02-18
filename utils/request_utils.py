@@ -78,7 +78,7 @@ async def fuck_cf(urls: str | list[str], proxy: Optional[str] = None):
                     is_cf_page = "Just a moment" in page_title or "请稍等"in page_title
 
                     if is_cf_page:
-                        logger.info(f"检测到 CF 验证，准备开始处理...")
+                        logger.debug(f"检测到 CF 验证，准备开始处理...")
 
                         # --- 重试逻辑开始 ---
                         max_cf_retries = 3
@@ -96,7 +96,7 @@ async def fuck_cf(urls: str | list[str], proxy: Optional[str] = None):
                                         captcha_type=CaptchaType.CLOUDFLARE_INTERSTITIAL,
                                     )
                                 # 如果执行到这里没有报错，说明可能成功了，或者至少跑完了流程
-                                logger.info("CF 验证流程执行完毕")
+                                logger.debug("CF 验证流程执行完毕")
                                 break
 
                             except Exception as e:

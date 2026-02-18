@@ -51,7 +51,8 @@ async def do_hanime1(client,db:DataBase):
             mini_thumbs = [os.path.join(cover_path, f"{vid_id}_thumb.jpg")for vid_id in id_list]
 
             pic_list = [generate_thumbnail(t_video_path = vi_paths,thumb_path=preview_path,cover_path= cover_path,vid_id=vid,num= top,today=date,clean_name=na_ls)for vi_paths,vid,top,na_ls in zip(video_paths,id_list,range(30-i,25-i,-1),na_list)]
-            pic_task =  asyncio.gather(*pic_list)
+            await asyncio.gather(*pic_list)
+
 
             for ti, vid_path, mini_path, v_id in zip(na_list, video_paths, mini_thumbs, id_list):
                 if vid_path == 0:
@@ -67,7 +68,6 @@ async def do_hanime1(client,db:DataBase):
 
             date = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
 
-            await asyncio.gather(pic_task)
             prv_path = [os.path.join(preview_path, f"{video_id}.jpg") for video_id in id_list]
             for vid,urls,num,prv_pa,tit,ch__id in zip(id_list,url_list,range(30-i,25-i,-1),prv_path,na_list,ch_ids):
                 await send_video(client=client,video_id=vid,url=urls,top = num,path=prv_pa,channel_id=pic_ch,title=tit,ch_name=vid_name,ch_id=ch__id)
