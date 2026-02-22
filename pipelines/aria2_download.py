@@ -19,9 +19,15 @@ async def aria2_session(uri: str, token: str):
             # 此处可以放置额外的清理代码
             logger.debug("Aria2 会话已关闭")
 
-async def _single_download(aria, url: str, dst: str, video_name: str):
-    if url == 0 :
+async def _single_download(aria, url: str, dst: str, video_name: str, max_retries: int = 3):
+    if url == 0:
         return 0
+
+    # 可选：文件已存在直接跳过（防止重复下载）
+    if os.path.exists(dst):
+        logger.info(f"[{video_name}] 文件已存在，跳过下载 -> {dst}")
+        return dst
+
     options = {
         "dir": os.path.dirname(dst),
         "out": os.path.basename(dst),
@@ -29,22 +35,49 @@ async def _single_download(aria, url: str, dst: str, video_name: str):
         "split": "16",
         "min-split-size": "1M",
         "continue": "true",
+        # 让 aria2 自己先内部重试几次
+        "max-tries": str(max_retries + 2),
+        "retry-wait": "3",
     }
 
-    gid = await aria.addUri([url], options)
+    for attempt in range(1, max_retries + 1):
+        gid = None
+        try:
+            gid = await aria.addUri([url], options)
+            logger.info(f"[{video_name}] 第 {attempt}/{max_retries} 次尝试启动，GID: {gid}")
 
-    while True:
-        status = await aria.tellStatus(gid)
-        st = status["status"]
+            while True:
+                status = await aria.tellStatus(gid)
+                st = status.get("status")
 
-        if st == "complete":
-            logger.info(f"[{video_name}] 完成 -> {dst}")
-            return dst
-        if st in ("error", "removed"):
-            logger.error(f"[{video_name}] 失败: {status.get('errorMessage')}")
-            return False
+                if st == "complete":
+                    logger.info(f"[{video_name}] 下载完成 -> {dst}")
+                    return dst
 
-        await asyncio.sleep(5)
+                if st in ("error", "removed"):
+                    err_msg = status.get('errorMessage', '未知错误')
+                    logger.warning(f"[{video_name}] 第 {attempt} 次失败: {err_msg}")
+                    # 关键：清理失败任务
+                    await aria.forceRemove(gid)   # 或 await aria.remove(gid)
+                    break
+
+                # 正常状态继续轮询
+                await asyncio.sleep(5)
+
+        except Exception as e:
+            logger.warning(f"[{video_name}] 第 {attempt} 次请求异常: {e}")
+            if gid:
+                try:
+                    await aria.forceRemove(gid)
+                except:
+                    pass  # 清理失败也无所谓
+
+        if attempt < max_retries:
+            logger.info(f"[{video_name}] 等待 3 秒后进行第 {attempt + 1} 次重试...")
+            await asyncio.sleep(3)
+
+    logger.error(f"[{video_name}] 已达到最大重试次数 {max_retries}，最终失败。")
+    return False
 
 async def start_batch_download(urls: list[str], download_dir: str, names: list[str]):
     cfg =load_json('aria2.json')

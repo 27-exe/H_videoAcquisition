@@ -138,6 +138,7 @@ class IwaraSpider(BaseSpider):
                         json_files.append(data)
                     else:
                         json_files.append({})
+                await asyncio.sleep(10)
             async with aiohttp.ClientSession() as session:
                 for y in range(0,30,5):
                     down_task = [self.deobfuscation(file,session=session)for file in json_files[y:y+5]]

@@ -79,14 +79,14 @@ async def fuck_cf(urls: str | list[str], proxy_str: Optional[str] = None,pro_nam
                             await page.wait_for_selector(select, state="visible", timeout=30000)
                             logger.debug("目标元素已成功渲染")
                             target_rendered = True
-                            timestamp = int(time.time())
-                            screenshot_path = f"error_shot/success_{i}_{timestamp}.png"  # 改个名字区分成功
-                            await page.screenshot(path=screenshot_path)
+                           # timestamp = int(time.time())
+                           # screenshot_path = f"error_shot/success_{i}_{timestamp}.png"  # 改个名字区分成功
+                           # await page.screenshot(path=screenshot_path)
                         except Exception:
                             logger.warning("未检测到目标元素卡片，准备检查是否被 CF 拦截...")
 
                     # 检查是否触发了 CF
-                    # 💡 核心修改：如果目标元素已经渲染成功，说明没有被 CF 阻挡，直接跳过 CF 判断！
+
                     is_cf_page = False
                     if not target_rendered:
                         page_title = await page.title()
