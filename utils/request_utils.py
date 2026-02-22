@@ -67,7 +67,7 @@ async def fuck_cf(urls: str | list[str], proxy_str: Optional[str] = None,pro_nam
                     page = await context.new_page()
                     logger.debug(f"[{i + 1}/{len(url_list)}] 正在访问: {url}")
                     response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                    await page.wait_for_load_state("networkidle", timeout=120000)
+                    await page.wait_for_load_state("networkidle", timeout=300000)
                     if select is not None:
                         try:
                             await page.wait_for_selector(
