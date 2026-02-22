@@ -3,7 +3,6 @@ import os
 import asyncio,time,random
 from typing import Optional
 from pathlib import Path
-from urllib.parse import urlparse
 from camoufox import AsyncCamoufox
 from playwright_captcha import CaptchaType, ClickSolver, FrameworkType
 from playwright_captcha.utils.camoufox_add_init_script.add_init_script import get_addon_path
@@ -21,20 +20,21 @@ _BROWSER_SEMAPHORE = None  # 初始化为 None
 logger = logging.getLogger(__name__)
 
 
-async def fuck_cf(urls: str | list[str], proxy_str: Optional[str] = None,storage_state = None,need_resp = False,select = None):
+async def fuck_cf(urls: str | list[str], proxy_str: Optional[str] = None,pro_name = None,pro_word = None,storage_state = None,need_resp = False,select = None):
     """
     支持传入单个 URL 或 URL 列表。
     如果是列表，将复用同一个 Context (共享 Cookie)，仅在必要时点击 CF。
     """
 
-    parsed = urlparse(proxy_str)
+    if proxy_str is not None:
 
-    proxy = {
-        "server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}",
-        "username": parsed.username,
-        "password": parsed.password
-    }
-
+        proxy = {
+            "server": proxy_str,
+            "username": pro_name,
+            "password": pro_word
+        }
+    else:
+        proxy = None
     global _BROWSER_SEMAPHORE
     if _BROWSER_SEMAPHORE is None:
         _BROWSER_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_BROWSERS)
@@ -180,18 +180,23 @@ async def login(
         username_selector: str,
         password_selector: str,
         proxy_str: Optional[str] = None,
+        pro_name = None,
+        pro_word = None,
         save_state_path: str = "auth_state.json"
 ) -> Optional[str]:
     """
     通用自动登录函数，并将登录后的状态 (Cookies 和 Local Storage) 保存到本地。
     """
-    parsed = urlparse(proxy_str)
 
-    proxy = {
-        "server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}",
-        "username": parsed.username,
-        "password": parsed.password
-    }
+    if proxy_str is not None:
+
+        proxy = {
+            "server": proxy_str,
+            "username": pro_name,
+            "password": pro_word
+        }
+    else:
+        proxy = None
 
     global _BROWSER_SEMAPHORE
     if _BROWSER_SEMAPHORE is None:
