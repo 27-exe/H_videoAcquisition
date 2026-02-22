@@ -76,6 +76,8 @@ async def fuck_cf(urls: str | list[str], proxy_str: Optional[str] = None,pro_nam
                                 timeout=30000
                             )
                             logger.debug("目标元素已成功渲染")
+                            timestamp = int(time.time())
+                            screenshot_path = f"error_shot/cf_fail_{i}_{attempt}_{timestamp}.png"
                             await page.screenshot(path=screenshot_path)
                         except Exception:
                             logger.warning("未检测到目标元素卡片，额外等待 8 秒后继续...")
