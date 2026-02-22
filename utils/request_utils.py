@@ -19,15 +19,21 @@ _BROWSER_SEMAPHORE = None  # 初始化为 None
 
 logger = logging.getLogger(__name__)
 
-
-async def fuck_cf(urls: str | list[str], proxy_str: Optional[str] = None,pro_name = None,pro_word = None,storage_state = None,need_resp = False,select = None):
+async def fuck_cf(
+    urls: str | list[str],
+    proxy_str: Optional[str] = None,
+    pro_name = None,
+    pro_word = None,
+    storage_state = None,
+    need_resp = False,
+    select = None,
+    max_retries: int = 3          # ← 新增参数，默认重试3次
+):
     """
     支持传入单个 URL 或 URL 列表。
-    如果是列表，将复用同一个 Context (共享 Cookie)，仅在必要时点击 CF。
+    新增：每个 URL 独立重试（针对 Page.goto 超时、CF、网络抖动等）
     """
-
     if proxy_str is not None:
-
         proxy = {
             "server": proxy_str,
             "username": pro_name,
@@ -35,15 +41,15 @@ async def fuck_cf(urls: str | list[str], proxy_str: Optional[str] = None,pro_nam
         }
     else:
         proxy = None
+
     global _BROWSER_SEMAPHORE
     if _BROWSER_SEMAPHORE is None:
         _BROWSER_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_BROWSERS)
 
-    # 统一转为列表处理
     url_list = [urls] if isinstance(urls, str) else urls
     results = []
+
     async with _BROWSER_SEMAPHORE:
-        # 启动浏览器实例
         async with AsyncCamoufox(
                 headless=True,
                 geoip=True,
@@ -52,129 +58,134 @@ async def fuck_cf(urls: str | list[str], proxy_str: Optional[str] = None,pro_nam
                 config={'forceScopeAccess': True},
                 disable_coop=True,
                 main_world_eval=True,
-                proxy=proxy,  # 添加代理
+                proxy=proxy,
                 addons=[os.path.abspath(ADDON_PATH)]
         ) as browser:
-            # 创建同一个 Context，后续所有的 page.goto 都会携带相同的 Cookie
-            context = await browser.new_context(storage_state = storage_state)
+            context = await browser.new_context(storage_state=storage_state)
 
             for i, url in enumerate(url_list):
                 page = None
-                try:
-                    if url == 0:
-                        results.append(0)
-                        continue
-                    page = await context.new_page()
-                    logger.debug(f"[{i + 1}/{len(url_list)}] 正在访问: {url}")
-                    response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                final_result = ""   # 默认失败结果
 
+                if url == 0:
+                    results.append(0)
+                    continue
+
+                # ==================== 新增：每个 URL 独立重试 ====================
+                for attempt in range(1, max_retries + 1):
                     try:
-                        await page.wait_for_load_state("networkidle", timeout=15000)
-                    except:
-                        pass
+                        page = await context.new_page()
+                        logger.debug(f"[{i + 1}/{len(url_list)}] 第 {attempt}/{max_retries} 次尝试访问: {url}")
 
-                    target_rendered = False
-                    if select is not None:
+                        # 关键：goto 超时重试
+                        response = await page.goto(
+                            url,
+                            wait_until="domcontentloaded",
+                            timeout=60000   # 你可以改成90000更宽松
+                        )
+
                         try:
-                            await page.wait_for_selector(select, state="visible", timeout=30000)
-                            logger.debug("目标元素已成功渲染")
-                            target_rendered = True
-                           # timestamp = int(time.time())
-                           # screenshot_path = f"error_shot/success_{i}_{timestamp}.png"  # 改个名字区分成功
-                           # await page.screenshot(path=screenshot_path)
-                        except Exception:
-                            logger.warning("未检测到目标元素卡片，准备检查是否被 CF 拦截...")
+                            await page.wait_for_load_state("networkidle", timeout=15000)
+                        except:
+                            pass
 
-                    # 检查是否触发了 CF
-
-                    is_cf_page = False
-                    if not target_rendered:
-                        page_title = await page.title()
-                        if response and response.status in [403, 429]:  # 顺便加上 429 防限流判定
-                            is_cf_page = True
-                        elif "Attention Required" in page_title or "Just a moment" in page_title:
-                            is_cf_page = True
-
-                    if is_cf_page:
-                        logger.debug(f"检测到 CF 验证，准备开始处理...")
-                        # --- 重试逻辑开始 ---
-                        max_cf_retries = 3
-                        await page.wait_for_timeout(2000)
-                        for attempt in range(max_cf_retries):
+                        target_rendered = False
+                        if select is not None:
                             try:
-                                async with ClickSolver(
+                                await page.wait_for_selector(select, state="visible", timeout=30000)
+                                logger.debug("目标元素已成功渲染")
+                                target_rendered = True
+                            except Exception:
+                                logger.warning("未检测到目标元素卡片，准备检查是否被 CF 拦截...")
+
+                        # CF 判断与处理（保持你原来的逻辑）
+                        is_cf_page = False
+                        if not target_rendered:
+                            page_title = await page.title()
+                            if response and response.status in [403, 429]:
+                                is_cf_page = True
+                            elif "Attention Required" in page_title or "Just a moment" in page_title:
+                                is_cf_page = True
+
+                        if is_cf_page:
+                            logger.debug(f"检测到 CF 验证，准备处理...")
+                            max_cf_retries = 3
+                            await page.wait_for_timeout(2000)
+                            for cf_attempt in range(max_cf_retries):
+                                try:
+                                    async with ClickSolver(
                                         framework=FrameworkType.CAMOUFOX,
                                         page=page,
                                         max_attempts=3,
                                         attempt_delay=2
-                                ) as solver:
-                                    await solver.solve_captcha(
-                                        captcha_container=page,
-                                        captcha_type=CaptchaType.CLOUDFLARE_INTERSTITIAL,
-                                    )
-                                logger.debug("CF 验证流程执行完毕")
-                                break
-
-                            except Exception as e:
-                                log_msg = str(e).split('\n')[0]
-                                logger.warning(f"CF 尝试 [{attempt + 1}/{max_cf_retries}] 失败: {log_msg}")
-
-                                timestamp = int(time.time())
-                                screenshot_path = f"error_shot/cf_fail_{i}_{attempt}_{timestamp}.png"
-                                try:
-                                    await page.screenshot(path=screenshot_path)
-                                except Exception:
-                                    pass
-
-                                if attempt < max_cf_retries - 1:
-                                    await asyncio.sleep(3)
-                                    try:
+                                    ) as solver:
+                                        await solver.solve_captcha(
+                                            captcha_container=page,
+                                            captcha_type=CaptchaType.CLOUDFLARE_INTERSTITIAL,
+                                        )
+                                    logger.debug("CF 验证完成")
+                                    break
+                                except Exception as e:
+                                    logger.warning(f"CF 尝试 [{cf_attempt+1}/{max_cf_retries}] 失败")
+                                    if cf_attempt < max_cf_retries - 1:
+                                        await asyncio.sleep(3)
                                         await page.reload()
                                         await asyncio.sleep(5)
-                                    except:
-                                        pass
-                        # --- 重试逻辑结束 ---
-                        await asyncio.sleep(5)
 
-                        # 💡 核心修改二：在 CF 可能引发的重载之后，再次等待目标元素渲染
-                        if select is not None:
+                            await asyncio.sleep(5)
+                            if select is not None:
+                                try:
+                                    await page.wait_for_selector(select, state="visible", timeout=30000)
+                                except:
+                                    pass
+
+                        # 成功获取结果
+                        if need_resp:
                             try:
-                                await page.wait_for_selector(select, state="visible", timeout=30000)
-                                logger.debug("CF 处理后，目标元素已成功渲染")
-                            except Exception:
-                                logger.warning("CF 处理后，依然未检测到目标元素")
+                                res_data = await response.json()
+                            except:
+                                res_data = await response.text()
+                            final_result = res_data
+                        else:
+                            final_result = await page.content()
 
-                    if need_resp:
-                        try:
-                            res_data = await response.json()
-                        except:
-                            res_data = await response.text()
-                        results.append(res_data)
-                    else:
-                        # 此时再获取 content，确保是在最终渲染状态下提取
-                        results.append(await page.content())
-                except Exception as e:
-                    # 外层的大异常捕获
-                    err_msg = str(e).split('\n')[0]
-                    logger.warning(f"访问 {url} 出现未知错误: {err_msg}")
+                        logger.debug(f"[{i + 1}/{len(url_list)}] 第 {attempt} 次成功")
+                        break   # 成功就跳出重试
 
-                    # 错误截图
-                    timestamp = int(time.time())
-                    screenshot_path = f"error_shot/error_global_{i}_{timestamp}.png"
+                    except Exception as e:
+                        err_msg = str(e).split('\n')[0]
+                        logger.warning(f"[{i + 1}/{len(url_list)}] 第 {attempt}/{max_retries} 次失败: {err_msg}")
+
+                        # 超时专属提示（你遇到的错误）
+                        if "Timeout" in err_msg and "goto" in err_msg:
+                            logger.warning(f"⚠️ 检测到 Page.goto 超时（常见于 apiq.iwara.tv），准备重试...")
+
+                        # 清理本次失败的 page
+                        if page:
+                            try:
+                                await page.close()
+                            except:
+                                pass
+                            page = None
+
+                        if attempt == max_retries:
+                            logger.error(f"[{i + 1}/{len(url_list)}] 已达最大重试次数，仍失败")
+                            final_result = ""   # 最终失败返回空
+                        else:
+                            # 指数退避 + 随机抖动（防被封）
+                            sleep_time = 3 * (2 ** (attempt - 1)) + random.uniform(1, 4)
+                            logger.info(f"等待 {sleep_time:.1f} 秒后重试...")
+                            await asyncio.sleep(sleep_time)
+
+                # 把最终结果加入列表
+                results.append(final_result)
+
+                # 最终清理
+                if page:
                     try:
-                        await page.screenshot(path=screenshot_path)
+                        await page.close()
                     except:
                         pass
-
-                    results.append("")  # 发生错误时追加空字符串或保留现有内容
-                finally:
-                    logger.debug(f"[{i + 1}/{len(url_list)}] 访问结束")
-                    # 释放资源，防止内存泄漏
-                    if page:
-                        try:
-                            await page.close()
-                        except:
-                            pass
 
             return results[0] if isinstance(urls, str) else results
 
