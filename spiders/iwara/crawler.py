@@ -78,7 +78,7 @@ class IwaraSpider(BaseSpider):
         # 有 CF
         v_name = []
         v_url = []
-        results = await fuck_cf(urls,  proxy_str=self.proxy_url,pro_name=self.pro_name,pro_word=self.pro_word,storage_state=self.state_path,select='.page-videoList .col-12.col-lg-9.order-2.order-lg-1 > div > div > div')
+        results = await fuck_cf(urls,  proxy_str=self.proxy_url,pro_name=self.pro_name,pro_word=self.pro_word,storage_state=self.state_path,select='.page-videoList .col-12.col-lg-9.order-2.order-lg-1 > div > div > div > a>img')
 
         processed = make_result(urls, results)
 
