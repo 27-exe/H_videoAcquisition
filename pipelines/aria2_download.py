@@ -45,23 +45,35 @@ async def _single_download(aria, url: str, dst: str, video_name: str, max_retrie
         try:
             gid = await aria.addUri([url], options)
             logger.info(f"[{video_name}] 第 {attempt}/{max_retries} 次尝试启动，GID: {gid}")
+            last_completed = 0
+            stuck_count = 0  # 计数器：记录进度不动的次数
 
             while True:
                 status = await aria.tellStatus(gid)
                 st = status.get("status")
+                completed = int(status.get("completedLength", 0))
 
                 if st == "complete":
-                    logger.info(f"[{video_name}] 下载完成 -> {dst}")
                     return dst
 
                 if st in ("error", "removed"):
-                    err_msg = status.get('errorMessage', '未知错误')
-                    logger.warning(f"[{video_name}] 第 {attempt} 次失败: {err_msg}")
-                    # 关键：清理失败任务
-                    await aria.forceRemove(gid)   # 或 await aria.remove(gid)
-                    break
+                    break  # 触发外层 for 循环重试
 
-                # 正常状态继续轮询
+                # --- 新增：卡住检测逻辑 ---
+                if completed > 0 and completed == last_completed:
+                    stuck_count += 1
+                else:
+                    stuck_count = 0  # 进度有变化，重置计数器
+
+                last_completed = completed
+
+                # 如果连续 5 次检查（约 25 秒）进度都没动，且还在 active 状态
+                if stuck_count >= 5:
+                    logger.warning(f"[{video_name}] 检测到下载卡住，强制重试...")
+                    await aria.forceRemove(gid)
+                    break  # 跳出 while 循环，触发外层 attempt 重试
+                # -----------------------
+
                 await asyncio.sleep(5)
 
         except Exception as e:
