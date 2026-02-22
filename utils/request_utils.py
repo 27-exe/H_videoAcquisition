@@ -68,7 +68,6 @@ async def fuck_cf(urls: str | list[str], proxy_str: Optional[str] = None,pro_nam
                     logger.debug(f"[{i + 1}/{len(url_list)}] 正在访问: {url}")
                     response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
                     await page.wait_for_load_state("networkidle", timeout=120000)
-                    await asyncio.sleep(10)  # 等待额外的 JS 渲染
                     if select is not None:
                         try:
                             await page.wait_for_selector(
@@ -77,6 +76,7 @@ async def fuck_cf(urls: str | list[str], proxy_str: Optional[str] = None,pro_nam
                                 timeout=30000
                             )
                             logger.debug("目标元素已成功渲染")
+                            await page.screenshot(path=screenshot_path)
                         except Exception:
                             logger.warning("未检测到目标元素卡片，额外等待 8 秒后继续...")
                             await asyncio.sleep(8)
