@@ -4,6 +4,8 @@ base_url: "https://hanime1.me/"
 page: 1                # 爬取的起始页码
 keywords: "全部"        # 搜索关键词（对应 URL 中的 genre）
 proxy_url: "http://127.0.0.1:7890"  # 代理服务器地址
+proxy_name : "username"
+proxy_pass : "password"
 
 # 浏览器请求头
 headers:

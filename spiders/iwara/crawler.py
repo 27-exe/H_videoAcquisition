@@ -25,7 +25,7 @@ async def if_exit(url_list,db:DataBase):
 class IwaraSpider(BaseSpider):
     name: str = "iwara"
     version: str = "1.0"
-    enable_proxy: bool = False      #启用代理
+    enable_proxy: bool = True      #启用代理
     need_login: bool = False        #需要登录
     default_timeout: int = 15
     default_retries: int = 3
@@ -46,6 +46,8 @@ class IwaraSpider(BaseSpider):
         self.username  = config.get("username", None)
         self.password  = config.get("password", None)
         self.proxy_url = config.get("proxy_url", None)  if self.enable_proxy else None
+        self.pro_name = config.get("proxy_name", None) if self.enable_proxy else None
+        self.pro_word = config.get("proxy_pass", None) if self.enable_proxy else None
         self.error = None
         self.db = db
 
@@ -57,6 +59,8 @@ class IwaraSpider(BaseSpider):
                         self.username,
                         self.password,
                         proxy_str=self.proxy_url,
+                        pro_name=self.pro_name,
+                        pro_word=self.pro_word,
                         username_selector='input[name="email"]',
                         password_selector='input[name="password"]',
                         save_state_path=self.state_path)
@@ -74,7 +78,7 @@ class IwaraSpider(BaseSpider):
         # 有 CF
         v_name = []
         v_url = []
-        results = await fuck_cf(urls,  proxy_str=self.proxy_url,storage_state=self.state_path,select='.page-videoList .col-12.col-lg-9.order-2.order-lg-1 > div > div > div')
+        results = await fuck_cf(urls,  proxy_str=self.proxy_url,pro_name=self.pro_name,pro_word=self.pro_word,storage_state=self.state_path,select='.page-videoList .col-12.col-lg-9.order-2.order-lg-1 > div > div > div')
 
         processed = make_result(urls, results)
 
