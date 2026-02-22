@@ -67,8 +67,8 @@ async def fuck_cf(urls: str | list[str], proxy_str: Optional[str] = None,pro_nam
                     page = await context.new_page()
                     logger.debug(f"[{i + 1}/{len(url_list)}] 正在访问: {url}")
                     response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                    await page.wait_for_load_state("networkidle", timeout=120000)  # 给 JS 渲染和 CF 挑战一点时间
-                    await page.wait_for_load_state("load", timeout=30000)
+                    await page.wait_for_load_state("networkidle", timeout=120000)
+                    await asyncio.sleep(10)  # 等待额外的 JS 渲染
                     if select is not None:
                         try:
                             await page.wait_for_selector(

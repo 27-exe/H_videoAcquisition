@@ -4,6 +4,8 @@ base_url: "https://www.iwara.tv/"
 page: 0                # 爬取的起始页码
 keywords: "trending"        # 搜索关键词（对应 URL 中的 sort）
 proxy_url: "http://127.0.0.1:7890"  # 代理服务器地址
+proxy_name : "huvo14409-region-HK-sid-Uu8AGnQB-t-5"
+proxy_pass : "coenhexn"
 username:  "your_username"  # Iwara 登录用户名
 password:  "your_password"  # Iwara 登录密码
 
