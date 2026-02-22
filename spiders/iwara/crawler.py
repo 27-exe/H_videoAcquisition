@@ -56,6 +56,7 @@ class IwaraSpider(BaseSpider):
             await login("https://www.iwara.tv/login",
                         self.username,
                         self.password,
+                        proxy_str=self.proxy_url,
                         username_selector='input[name="email"]',
                         password_selector='input[name="password"]',
                         save_state_path=self.state_path)
@@ -73,7 +74,7 @@ class IwaraSpider(BaseSpider):
         # 有 CF
         v_name = []
         v_url = []
-        results = await fuck_cf(urls,storage_state=self.state_path,select='.page-videoList .col-12.col-lg-9.order-2.order-lg-1 > div > div > div')
+        results = await fuck_cf(urls,  proxy_str=self.proxy_url,storage_state=self.state_path,select='.page-videoList .col-12.col-lg-9.order-2.order-lg-1 > div > div > div')
 
         processed = make_result(urls, results)
 
