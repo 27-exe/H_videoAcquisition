@@ -10,7 +10,7 @@ class CrawlResult:
     success: bool = False
     data: List[list] = None          # 主数据列表(目标链接,图片,视频,文字)
     detail: List = None                        # 详情信息(爬取设置细节)
-    extra: Dict[str, Any] = None               # 其他附加信息(爬取时产生细节)
+    extra: List = None               # 其他附加信息(爬取时产生细节)
     error: Optional[str] = None                # 错误描述
     crawled_at: str = None                     # 爬取日期
     page_url: Optional[str] = None             # 本次请求的URL
@@ -65,7 +65,7 @@ class BaseSpider(ABC):
         return response
 
     @abstractmethod
-    def parse(self, response: Any) -> CrawlResult:
+    def parse(self, response) -> CrawlResult:
         """
         核心解析方法
         参数 response 由 run() 统一传入，可能是：

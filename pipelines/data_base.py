@@ -64,15 +64,15 @@ class DataBase:
 
 # --- Iwara 表操作 ---
 
-    async def insert_iwara_info(self, video_url: str, title: str):
+    async def insert_iwara_info(self, video_url: str, title: str,ch_id):
         """插入或更新 Iwara 视频信息"""
         await self.ensure_initialized()
         async with self.edit_lock:
             try:
                 async with aiosqlite.connect(self.db_file) as conn:
                     await conn.execute(
-                        "INSERT OR REPLACE INTO iwara_info (video_url, title) VALUES (?, ?, ?)",
-                        (video_url, title)
+                        "INSERT OR REPLACE INTO iwara_info (video_url, title,ch_id) VALUES (?, ?, ?)",
+                        (video_url, title,ch_id)
                     )
                     await conn.commit()
                     logger.debug(f"Iwara 信息已存入数据库: {title}")

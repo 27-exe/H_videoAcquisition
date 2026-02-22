@@ -1,0 +1,19 @@
+# 爬虫基础配置
+name: "iwara_spider"
+base_url: "https://www.iwara.tv/"
+page: 0                # 爬取的起始页码
+keywords: "trending"        # 搜索关键词（对应 URL 中的 sort）
+proxy_url: "http://127.0.0.1:7890"  # 代理服务器地址
+username:  "your_username"  # Iwara 登录用户名
+password:  "your_password"  # Iwara 登录密码
+
+# 浏览器请求头
+headers:
+    accept: '*/*'
+    accept-language: 'zh-CN,zh;q=0.9'
+    origin: 'https://www.iwara.tv'
+    user-agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36'
+
+# Telegram 频道配置 (可以使用 @频道名 或 频道ID)
+video_channel: "@your_video_channel"  # 存放源视频的频道
+pic_channel: "@your_pic_channel"      # 存放预览图和 Top5 消息的频道

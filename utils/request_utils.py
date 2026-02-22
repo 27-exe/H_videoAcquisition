@@ -1,7 +1,7 @@
 import aiohttp
 import logging
 import os
-import asyncio,time
+import asyncio,time,random
 from typing import Optional, Dict
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -22,19 +22,7 @@ _BROWSER_SEMAPHORE = None  # 初始化为 None
 logger = logging.getLogger(__name__)
 
 
-@asynccontextmanager
-async def creat_session(header: Optional[Dict[str, str]] = None):
-    async with aiohttp.ClientSession(headers=header) as session:
-        yield session
-
-
-async def fetch(session: aiohttp.ClientSession, url: str, proxy: Optional[str] = None) -> str:
-    async with session.get(url, proxy=proxy) as resp:
-        resp.raise_for_status()
-        return await resp.text()
-
-
-async def fuck_cf(urls: str | list[str], proxy: Optional[str] = None):
+async def fuck_cf(urls: str | list[str], proxy: Optional[str] = None,storage_state = None,need_resp = False,select = None):
     """
     支持传入单个 URL 或 URL 列表。
     如果是列表，将复用同一个 Context (共享 Cookie)，仅在必要时点击 CF。
@@ -60,7 +48,7 @@ async def fuck_cf(urls: str | list[str], proxy: Optional[str] = None):
                 addons=[os.path.abspath(ADDON_PATH)]
         ) as browser:
             # 创建同一个 Context，后续所有的 page.goto 都会携带相同的 Cookie
-            context = await browser.new_context()
+            context = await browser.new_context(storage_state = storage_state)
 
             for i, url in enumerate(url_list):
                 page = None
@@ -70,19 +58,33 @@ async def fuck_cf(urls: str | list[str], proxy: Optional[str] = None):
                         continue
                     page = await context.new_page()
                     logger.debug(f"[{i + 1}/{len(url_list)}] 正在访问: {url}")
-                    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                    await asyncio.sleep(3)  # 初始等待页面加载
-
+                    response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    await page.wait_for_load_state("networkidle", timeout=120000)  # 给 JS 渲染和 CF 挑战一点时间
+                    await page.wait_for_load_state("load", timeout=30000)
+                    if select is not None:
+                        try:
+                            await page.wait_for_selector(
+                                select,
+                                state="visible",
+                                timeout=30000
+                            )
+                            logger.debug("目标元素已成功渲染")
+                        except Exception:
+                            logger.warning("未检测到目标元素卡片，额外等待 8 秒后继续...")
+                            await asyncio.sleep(8)
                     # 检查是否触发了 CF
                     page_title = await page.title()
-                    is_cf_page = "Just a moment" in page_title or "请稍等"in page_title
-
+                    is_cf_page = False
+                    if response and response.status == 403:
+                        is_cf_page = True
+                    elif "Attention Required" in page_title or "Just a moment" in page_title:
+                        is_cf_page = True
                     if is_cf_page:
                         logger.debug(f"检测到 CF 验证，准备开始处理...")
 
                         # --- 重试逻辑开始 ---
                         max_cf_retries = 3
-                        await asyncio.sleep(8)
+                        await page.wait_for_timeout(2000)
                         for attempt in range(max_cf_retries):
                             try:
                                 async with ClickSolver(
@@ -125,9 +127,17 @@ async def fuck_cf(urls: str | list[str], proxy: Optional[str] = None):
 
                         # 无论成功失败，给一点跳转时间
                         await asyncio.sleep(5)
-
-                    results.append(await page.content())
-
+                    if need_resp:
+                        # 如果是 API 请求，优先尝试转为 JSON，否则返回 text
+                        try:
+                            # 即使 content-type 没标明 json，也可以强制解析
+                            res_data = await response.json()
+                        except:
+                            res_data = await response.text()
+                        results.append(res_data)
+                    else:
+                        # 原有逻辑：返回渲染后的全量 HTML
+                        results.append(await page.content())
                 except Exception as e:
                     # 外层的大异常捕获
                     err_msg = str(e).split('\n')[0]
@@ -152,3 +162,98 @@ async def fuck_cf(urls: str | list[str], proxy: Optional[str] = None):
                             pass
 
             return results[0] if isinstance(urls, str) else results
+
+
+
+async def login(
+        url: str,
+        username: str,
+        password: str,
+        username_selector: str,
+        password_selector: str,
+        proxy: Optional[str] = None,
+        save_state_path: str = "auth_state.json"
+) -> Optional[str]:
+    """
+    通用自动登录函数，并将登录后的状态 (Cookies 和 Local Storage) 保存到本地。
+    """
+    global _BROWSER_SEMAPHORE
+    if _BROWSER_SEMAPHORE is None:
+        _BROWSER_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_BROWSERS)
+
+    async with _BROWSER_SEMAPHORE:
+        # 测试期间建议 headless=False
+        async with AsyncCamoufox(
+                headless=True,
+                geoip=True,
+                humanize=True,
+                i_know_what_im_doing=True,
+                config={'forceScopeAccess': True},
+                disable_coop=True,
+                main_world_eval=True,
+                proxy=proxy,
+                addons=[os.path.abspath(ADDON_PATH)]
+        ) as browser:
+            context = await browser.new_context()
+            page = None
+            try:
+                page = await context.new_page()
+                logger.debug(f"准备登录，正在访问: {url}")
+                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                await asyncio.sleep(3)  # 等待页面初始加载
+
+                # 1. 填写账号
+                logger.debug(f"等待账号输入框出现: {username_selector}")
+                await page.wait_for_selector(username_selector, state="visible", timeout=15000)
+                await page.fill(username_selector, username)
+                await asyncio.sleep(random.uniform(0.5, 1.5))  # 模拟人类输入停顿
+
+                # 2. 填写密码
+                logger.debug(f"等待密码输入框出现: {password_selector}")
+                await page.wait_for_selector(password_selector, state="visible", timeout=10000)
+                await page.fill(password_selector, password)
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+
+                # 3. 点击登录按钮
+                logger.debug(f"点击登录按钮")
+                login_button = page.get_by_role("button", name="Submit")
+
+                # 等待并点击
+                await login_button.wait_for(state="visible", timeout=10000)
+                await login_button.click()
+
+                # 4. 等待登录成功跳转或接口响应
+                logger.debug("等待登录状态响应...")
+                try:
+                    # 等待 URL 不再包含 "login" 字样，或者等待某个只有登录后才有的元素
+                    await page.wait_for_url(lambda url: "login" not in url.lower(), timeout=15000)
+                except:
+                    logger.warning("登录后页面未跳转，尝试继续保存状态...")
+
+                # 5. 提取并保存全局状态 (包含 Cookie 和 LocalStorage)
+                await context.storage_state(path=save_state_path)
+                logger.info(f"登录状态已成功提取并保存至: {save_state_path}")
+
+                return save_state_path
+
+            except Exception as e:
+                err_msg = str(e).split('\n')[0]
+                logger.warning(f"登录过程出现异常: {err_msg}")
+
+                timestamp = int(time.time())
+                screenshot_path = f"error_shot/login_fail_{timestamp}.png"
+                try:
+                    await page.screenshot(path=screenshot_path)
+                    logger.warning(f"已保存登录失败截图以供调试: {screenshot_path}")
+                except Exception:
+                    pass
+
+                return None
+
+            finally:
+                logger.debug("登录任务结束")
+                if page:
+                    try:
+                        await page.close()
+                    except:
+                        pass

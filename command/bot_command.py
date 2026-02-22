@@ -4,6 +4,7 @@ from telethon.events import StopPropagation
 from pipelines.load import load_json
 from scheduled.task import TaskManager
 from spiders.hanime1.tasks import do_hanime1
+from spiders.iwara.tasks import do_iwara
 
 logger = logging.getLogger(__name__)
 
@@ -96,8 +97,8 @@ async def register_order_handlers(client,db,ts:TaskManager):     #所有命令�
         try:
             if event.sender_id == int(ADMIN_ID):
 
-
                 await event.reply('立即更新iwara')
+                await do_iwara(client,db)
         finally:
             raise StopPropagation
 

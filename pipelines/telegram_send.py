@@ -96,6 +96,10 @@ async def send_video(client,title,video_id,url,top,path,channel_id,ch_name,ch_id
         logger.debug(f'成功发送视频{title}的预览图到频道')
     except Exception as e:
         logger.error(f"发送预览时出错: {str(e)}")
+    finally:
+        if os.path.exists(path) :
+            os.remove(path)
+            logger.debug('成功删除预览图文件')
 
 
 

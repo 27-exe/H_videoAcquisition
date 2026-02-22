@@ -155,7 +155,6 @@ class Hanime1spider(BaseSpider):
                         # 请求失败也要占位
                         download_urls.append(0)
 
-                await asyncio.sleep(6)
 
             except Exception as e:
                 self.success = False

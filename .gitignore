@@ -10,5 +10,7 @@ config/token.json
 config/aria2.json
 config/bot_cfg.json
 config/hanime1.yaml
+config/iwara.yaml
 *.token.json
 download/
+config/auth

@@ -1,6 +1,6 @@
 import logging,json,os,emoji,asyncio,shutil,uuid
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps,ImageFilter
 
 logger = logging.getLogger(__name__)
 
@@ -102,71 +102,71 @@ async def extract_frame_async(video_path, timestamp, output_path):
 
 
 def _draw_logic_sync(frames, thumb_path, is_vertical, info_dict):
-    """
-    纯 CPU 密集的绘图逻辑，保留同步写法以便在线程池运行
-    """
     num = info_dict["num"]
     today = info_dict["today"]
     clean_name = info_dict["name"]
     duration_str = info_dict["str"]
-    # 获取单张图宽高
-    with Image.open(frames[0]) as im:
-        w, h = im.size
 
-    if is_vertical:
-        # 竖屏逻辑：1080x1920画布，四宫格缩放至864x1536
-        canvas_w, canvas_h = 1080, 1920
-        target_w, target_h = 864, 1536  # 四宫格区域
-        white_h = 384  # 底部白块高度（1920 - 1536）
-        left_margin = (canvas_w - target_w) // 2  # 左侧留白
 
-        # 计算缩放比例
-        scale_w = target_w / (w * 2)  # 2列
-        scale_h = target_h / (h * 2)  # 2行
-        scale = min(scale_w, scale_h)
-        new_w = int(w * scale)
-        new_h = int(h * scale)
+    canvas_w, canvas_h = (1080, 1920) if is_vertical else (1920, 1080)
+    white_h = 384 if is_vertical else 360  # 底部文字区高度
+    grid_h = canvas_h - white_h  # 宫格实际可用高度
 
-        # 创建画布
-        canvas = Image.new('RGB', (canvas_w, canvas_h), (255, 255, 255))
+    # 1. 创建高斯模糊背景
+    with Image.open(frames[0]) as bg_ref:
+        # 先 fit 到目标尺寸
+        bg = ImageOps.fit(bg_ref, (canvas_w, canvas_h), method=Image.Resampling.LANCZOS)
 
-        # 四宫格坐标（居中）
-        positions = [
-            (left_margin, 0), (left_margin + new_w, 0),
-            (left_margin, new_h), (left_margin + new_w, new_h)
-        ]
+        # 缩小 -> 模糊 -> 放大
+        small_bg = bg.resize((canvas_w // 10, canvas_h // 10), resample=Image.Resampling.NEAREST)
+        small_bg = small_bg.filter(ImageFilter.GaussianBlur(radius=5))  # 缩小了10倍，半径也相应减小
+        canvas = small_bg.resize((canvas_w, canvas_h), resample=Image.Resampling.BILINEAR)
 
-        # 粘贴帧
-        for (x, y), fp in zip(positions, frames):
-            with Image.open(fp) as im:
-                im_resized = im.resize((new_w, new_h), Image.Resampling.LANCZOS)
-                canvas.paste(im_resized, (x, y))
-    else:
-        # 横屏逻辑：1920x1080画布，六宫格
-        scale_w = 1920 / (w * 3)
-        scale_h = 1080 / (h * 3)
-        scale = min(scale_w, scale_h)
-        new_w = int(w * scale)
-        new_h = int(h * scale)
-        white_h = 360  # 下部白块高度
+        # 转换为 RGBA 以支持半透明绘制
+        canvas = canvas.convert("RGBA")
 
-        # 创建画布
-        canvas_w, canvas_h = 1920, 1080
-        canvas = Image.new('RGB', (canvas_w, canvas_h), (255, 255, 255))
+    # 2. 计算宫格布局
+    cols = 2 if is_vertical else 3
+    rows = 2 if is_vertical else 2  # ←←← 横屏改成 2 行（原来是 3）
 
-        # 宫格坐标
-        positions = [
-            (0, 0), (new_w, 0), (new_w * 2, 0),
-            (0, new_h), (new_w, new_h), (new_w * 2, new_h),(new_w,new_h*2)
-        ]
+    cell_w = canvas_w // cols
+    cell_h = grid_h // rows  # 横屏现在是 720//2 = 360（完美16:9）
 
-        # 粘贴帧
-        for (x, y), fp in zip(positions, frames):
-            with Image.open(fp) as im:
-                im_resized = im.resize((new_w, new_h), Image.Resampling.LANCZOS)
-                canvas.paste(im_resized, (x, y))
+    # 3. 逐个粘贴帧 (等比例缩放并居中)
+    for idx, fp in enumerate(frames):
+        with Image.open(fp) as im:
+            orig_w, orig_h = im.size
+            # 计算在单元格内的缩放比例
+            scale = min(cell_w / orig_w, cell_h / orig_h)
+            new_w, new_h = int(orig_w * scale), int(orig_h * scale)
+            im_resized = im.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
-    # 绘制文字
+            # 计算在格子内的居中偏移量
+            offset_x = (cell_w - new_w) // 2
+            offset_y = (cell_h - new_h) // 2
+
+            r, c = divmod(idx, cols)
+
+            # 计算最终粘贴坐标
+            paste_x = c * cell_w + offset_x
+            paste_y = r * cell_h + offset_y
+
+            canvas.paste(im_resized, (paste_x, paste_y))
+
+    # 4. 绘制底部半透明文字遮罩
+    # 创建一个透明的图层用于绘制遮罩
+    overlay = Image.new('RGBA', canvas.size, (255, 255, 255, 0))
+    draw_ov = ImageDraw.Draw(overlay)
+
+    # 绘制半透明矩形 (200 为透明度，可调)
+    text_bg_region = [0, grid_h, canvas_w, canvas_h]
+    draw_ov.rectangle(text_bg_region, fill=(255, 255, 255, 200))
+
+    # 合并图层
+    canvas = Image.alpha_composite(canvas, overlay)
+
+
+    # 绘制文字，尝试加载中文字体，失败则回退到默认字体（可能无法显示中文）
     draw = ImageDraw.Draw(canvas)
     try:
         font_file = str(Path(__file__).resolve().parent.parent / "SimHei.ttf")
@@ -190,11 +190,11 @@ def _draw_logic_sync(frames, thumb_path, is_vertical, info_dict):
     if is_vertical:
         clean_name_display = no_emoji_name[:30] + "..." if len(no_emoji_name) > 30  else no_emoji_name
     else:
-        clean_name_display = no_emoji_name[:10] + "..." if len(no_emoji_name) > 10 else no_emoji_name
+        clean_name_display = no_emoji_name[:35] + "..." if len(no_emoji_name) > 35 else no_emoji_name
 
     if is_vertical:
         # 竖屏文字布局
-        white_area_y_start = canvas_h - white_h
+        white_area_y_start = grid_h
         left_margin = 20
         right_margin = 20
         right_align_x = canvas_w - right_margin
@@ -202,13 +202,13 @@ def _draw_logic_sync(frames, thumb_path, is_vertical, info_dict):
         # 绘制左侧文字 ("TOP.num")
         top_y = white_area_y_start + 180
         draw.text((left_margin, top_y), top_text, font=top_font, fill="black", anchor="ls")
-        top_bbox = draw.textbbox((left_margin+30, top_y), top_text, font=top_font, anchor="ls")
-        num_x = top_bbox[2]
-        draw.text((num_x, top_y), num_text, font=num_font, fill="black", anchor="ls")
+        #top_bbox = draw.textbbox((left_margin+30, top_y), top_text, font=top_font, anchor="ls")
+        #num_x = top_bbox[2]
+        #draw.text((num_x, top_y), num_text, font=num_font, fill="black", anchor="ls")
 
         # 绘制右侧文字 (日期, 时长, 标题)
         date_y = white_area_y_start + 60
-        draw.text((right_align_x, date_y), date_text, font=small_font, fill="black", anchor="ra")
+        #draw.text((right_align_x, date_y), date_text, font=small_font, fill="black", anchor="ra")
         duration_y = date_y + 60
         draw.text((right_align_x, duration_y), duration_text, font=small_font, fill="black", anchor="ra")
         title_y = duration_y + 80
@@ -223,53 +223,161 @@ def _draw_logic_sync(frames, thumb_path, is_vertical, info_dict):
         # 绘制左侧文字 ("TOP.num")
         top_y = white_area_y_start + 240
         draw.text((left_margin, top_y), top_text, font=top_font, fill="black", anchor="ls")
-        top_bbox = draw.textbbox((left_margin, top_y), top_text, font=top_font, anchor="ls")
-        num_x = top_bbox[2]
-        draw.text((num_x, top_y), num_text, font=num_font, fill="black", anchor="ls")
+        #top_bbox = draw.textbbox((left_margin, top_y), top_text, font=top_font, anchor="ls")
+        #num_x = top_bbox[2]
+        #draw.text((num_x, top_y), num_text, font=num_font, fill="black", anchor="ls")
 
         # 绘制右侧文字 (日期, 时长, 标题)
         date_y = white_area_y_start + 40
-        draw.text((right_align_x, date_y), date_text, font=small_font, fill="black", anchor="ra")
+        #draw.text((right_align_x, date_y), date_text, font=small_font, fill="black", anchor="ra")
         duration_y = date_y + 60
         draw.text((right_align_x, duration_y), duration_text, font=small_font, fill="black", anchor="ra")
         title_y = duration_y + 80
         draw.text((right_align_x, title_y), clean_name_display, font=large_font, fill="black", anchor="ra")
 
-    canvas.save(thumb_path, 'JPEG', quality=85)
+    canvas.convert("RGB").save(thumb_path, 'JPEG', quality=85)
     return thumb_path
 
 
+
 def stitch_cover(count, thumb_path, cover_path):
+    thumb_img = None
+    cover_img = None
     try:
         thumb_img = Image.open(thumb_path)
         cover_img = Image.open(cover_path)
-        if count == 7:
-            # 上下拼接
-            canvas = Image.new('RGB', (1920, 2160), (255, 255, 255))  # 调整宽度
-            positions = [(0, 0), (0, 1080)]
 
-            images = [thumb_img, cover_img]
-            for (x, y), im in zip(positions, images):
-                canvas.paste(im, (x, y))
+        # 定义目标封面尺寸
+        target_size = (1080, 1920) if count == 4 else (1920, 1080)
+        tw, th = target_size
 
-            canvas.save(thumb_path, 'JPEG', quality=85)
-        elif count == 4:#左右拼接
-            canvas = Image.new('RGB', (2160, 1920), (255, 255, 255))  # 调整宽度
-            positions = [(0, 0), (1080,0)]
+        # 1. 高斯模糊背景（完全铺满，无黑边）
+        bg = ImageOps.fit(cover_img, target_size, method=Image.Resampling.LANCZOS)
+        bg_small = bg.resize((tw // 10, th // 10), Image.Resampling.NEAREST)
+        bg_small = bg_small.filter(ImageFilter.GaussianBlur(radius=5))
+        processed_cover = bg_small.resize((tw, th), Image.Resampling.BILINEAR)
 
-            images = [thumb_img, cover_img]
-            for (x, y), im in zip(positions, images):
-                canvas.paste(im, (x, y))
+        # 2. 计算居中缩放后的前景尺寸
+        orig_w, orig_h = cover_img.size
+        scale = min(tw / orig_w, th / orig_h)  # 缩小到能完全显示
+        new_w = int(orig_w * scale)
+        new_h = int(orig_h * scale)
+        fg_resized = cover_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+        # 3. 计算居中坐标
+        paste_x = (tw - new_w) // 2
+        paste_y = (th - new_h) // 2
+
+        # 4. 把清晰原图贴到模糊背景上
+        processed_cover.paste(fg_resized, (paste_x, paste_y))
+
+
+        if count == 6:  # 横屏上下拼
+            canvas = Image.new('RGB', (1920, 2160), (255, 255, 255))
+            canvas.paste(thumb_img, (0, 1080))
+            canvas.paste(processed_cover, (0, 0))
+        else:  # 竖屏左右拼
+            canvas = Image.new('RGB', (2160, 1920), (255, 255, 255))
+            canvas.paste(thumb_img, (0, 0))
+            canvas.paste(processed_cover, (1080, 0))
+
+        canvas.save(thumb_path, 'JPEG', quality=85)
     except Exception as e:
         logger.error(f"stitch_cover 拼接失败: {e}")
     finally:
-        # 关闭图像，释放内存
-        try:
+        if thumb_img is not None:
             thumb_img.close()
+        if cover_img is not None:
             cover_img.close()
-        except:
-            pass
 
+
+def write_text_on_image(image_path, top: int, date: str):
+    """
+    专门处理拼接后大图的文字写入逻辑
+    """
+    try:
+        with Image.open(image_path) as img:
+            img = img.convert("RGBA")  # 转换以支持绘制
+            w, h = img.size
+
+            # 1. 识别拼接类型
+            if w == 2160 and h == 1920:
+                # 竖屏视频拼接：预览图(1080x1920)在左，封面在右
+                is_vertical = True
+                offset_y = 0
+                canvas_w = 1080  # 文字工作的逻辑宽度
+            elif w == 1920 and h == 2160:
+                # 横屏视频拼接：封面在上，预览图(1920x1080)在下
+                is_vertical = False
+                offset_y = 1080  # 文字区域下移一个封面的高度
+                canvas_w = 1920
+            else:
+                logger.error(f"非预期的拼接尺寸: {w}x{h}")
+                return False
+
+            # 2. 准备字体与绘制对象
+            draw = ImageDraw.Draw(img)
+            try:
+
+                font_file = str(Path(__file__).resolve().parent.parent / "SimHei.ttf")
+                top_font = ImageFont.truetype(font_file, size=130 if is_vertical else 200)
+                num_font = ImageFont.truetype(font_file, size=100 if is_vertical else 160)
+                small_font = ImageFont.truetype(font_file, size=35 if is_vertical else 45)
+            except IOError:
+                top_font = num_font = small_font = ImageFont.load_default()
+
+            # 3. 设置基础坐标
+            grid_h = 1920 - 384 if is_vertical else 1080 - 360  # 计算宫格底部边界
+            white_area_y_start = grid_h + offset_y
+
+            top_text = "TOP"
+            num_text = f".{top}"
+            date_text = f"Date: {date}"
+
+            # 4. 分别执行横竖屏绘制
+            if is_vertical:
+                left_margin = 20
+                right_margin = 20
+                right_align_x = canvas_w - right_margin
+
+                # 绘制 .num (紧跟在 TOP 后面)
+                top_y = white_area_y_start + 180
+                # 需要计算 TOP 的宽度来确定 .num 的起点
+                top_bbox = draw.textbbox((left_margin, top_y), top_text, font=top_font, anchor="ls")
+                num_x = top_bbox[2]
+                draw.text((num_x, top_y), num_text, font=num_font, fill="black", anchor="ls")
+
+                # 绘制日期
+                date_y = white_area_y_start + 60
+                draw.text((right_align_x, date_y), date_text, font=small_font, fill="black", anchor="ra")
+            else:
+                left_margin = 40
+                right_margin = 80
+                right_align_x = canvas_w - right_margin
+
+                # 绘制 .num
+                top_y = white_area_y_start + 240
+                top_bbox = draw.textbbox((left_margin, top_y), top_text, font=top_font, anchor="ls")
+                num_x = top_bbox[2]
+                draw.text((num_x, top_y), num_text, font=num_font, fill="black", anchor="ls")
+
+                # 绘制日期
+                date_y = white_area_y_start + 40
+                draw.text((right_align_x, date_y), date_text, font=small_font, fill="black", anchor="ra")
+
+            # 5. 生成新文件名并保存结果
+            p = Path(image_path)
+            # 这里做一个安全的替换，将斜杠替换为横杠
+            safe_date = date.replace('/', '-')
+
+            new_filename = f"{p.stem}_{safe_date}{p.suffix}"
+            new_image_path = str(p.parent / new_filename)
+
+            img.convert("RGB").save(new_image_path, 'JPEG', quality=85)
+            return new_image_path
+    except Exception as e:
+        logger.error(f"写入文字失败: {e}")
+        return False
 
 async def generate_thumbnail(t_video_path: str, thumb_path: str,cover_path, vid_id,num, today, clean_name):
     if t_video_path == 0:
@@ -291,7 +399,7 @@ async def generate_thumbnail(t_video_path: str, thumb_path: str,cover_path, vid_
         is_vertical = width < height
 
         # 3. 计算抽帧时间点
-        count = 4 if is_vertical else 7
+        count = 4 if is_vertical else 6
         times = [duration * i / (count + 1) for i in range(1, count + 1)]
 
         # 4. 并发抽帧 (利用 asyncio.gather 提升效率)
