@@ -67,31 +67,36 @@ async def fuck_cf(urls: str | list[str], proxy_str: Optional[str] = None,pro_nam
                     page = await context.new_page()
                     logger.debug(f"[{i + 1}/{len(url_list)}] 正在访问: {url}")
                     response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                    await page.wait_for_load_state("networkidle", timeout=300000)
+
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=15000)
+                    except:
+                        pass
+
+                    target_rendered = False
                     if select is not None:
                         try:
-                            await page.wait_for_selector(
-                                select,
-                                state="visible",
-                                timeout=30000
-                            )
+                            await page.wait_for_selector(select, state="visible", timeout=30000)
                             logger.debug("目标元素已成功渲染")
+                            target_rendered = True
                             timestamp = int(time.time())
-                            screenshot_path = f"error_shot/cf_fail_{i}_{attempt}_{timestamp}.png"
+                            screenshot_path = f"error_shot/success_{i}_{timestamp}.png"  # 改个名字区分成功
                             await page.screenshot(path=screenshot_path)
                         except Exception:
-                            logger.warning("未检测到目标元素卡片，额外等待 8 秒后继续...")
-                            await asyncio.sleep(8)
+                            logger.warning("未检测到目标元素卡片，准备检查是否被 CF 拦截...")
+
                     # 检查是否触发了 CF
-                    page_title = await page.title()
+                    # 💡 核心修改：如果目标元素已经渲染成功，说明没有被 CF 阻挡，直接跳过 CF 判断！
                     is_cf_page = False
-                    if response and response.status == 403:
-                        is_cf_page = True
-                    elif "Attention Required" in page_title or "Just a moment" in page_title:
-                        is_cf_page = True
+                    if not target_rendered:
+                        page_title = await page.title()
+                        if response and response.status in [403, 429]:  # 顺便加上 429 防限流判定
+                            is_cf_page = True
+                        elif "Attention Required" in page_title or "Just a moment" in page_title:
+                            is_cf_page = True
+
                     if is_cf_page:
                         logger.debug(f"检测到 CF 验证，准备开始处理...")
-
                         # --- 重试逻辑开始 ---
                         max_cf_retries = 3
                         await page.wait_for_timeout(2000)
@@ -100,53 +105,53 @@ async def fuck_cf(urls: str | list[str], proxy_str: Optional[str] = None,pro_nam
                                 async with ClickSolver(
                                         framework=FrameworkType.CAMOUFOX,
                                         page=page,
-                                        max_attempts=3,  # 库内部的单次尝试次数
+                                        max_attempts=3,
                                         attempt_delay=2
                                 ) as solver:
                                     await solver.solve_captcha(
                                         captcha_container=page,
                                         captcha_type=CaptchaType.CLOUDFLARE_INTERSTITIAL,
                                     )
-                                # 如果执行到这里没有报错，说明可能成功了，或者至少跑完了流程
                                 logger.debug("CF 验证流程执行完毕")
                                 break
 
                             except Exception as e:
-                                # 捕获所有异常，不打印堆栈，只打印 Warning
-                                log_msg = str(e).split('\n')[0]  # 只取错误信息的第一行，保持日志整洁
+                                log_msg = str(e).split('\n')[0]
                                 logger.warning(f"CF 尝试 [{attempt + 1}/{max_cf_retries}] 失败: {log_msg}")
 
-                                # 截图保存 (修复: 添加 path 参数)
                                 timestamp = int(time.time())
                                 screenshot_path = f"error_shot/cf_fail_{i}_{attempt}_{timestamp}.png"
                                 try:
                                     await page.screenshot(path=screenshot_path)
-                                    logger.warning(f"已保存调试截图: {screenshot_path}")
                                 except Exception:
-                                    pass  # 截图失败就不管了
+                                    pass
 
                                 if attempt < max_cf_retries - 1:
-                                    # 如果不是最后一次尝试，稍微等待并刷新页面重试
                                     await asyncio.sleep(3)
                                     try:
                                         await page.reload()
-                                        await asyncio.sleep(5)  # 等待重载后 CF 出现
+                                        await asyncio.sleep(5)
                                     except:
                                         pass
                         # --- 重试逻辑结束 ---
-
-                        # 无论成功失败，给一点跳转时间
                         await asyncio.sleep(5)
+
+                        # 💡 核心修改二：在 CF 可能引发的重载之后，再次等待目标元素渲染
+                        if select is not None:
+                            try:
+                                await page.wait_for_selector(select, state="visible", timeout=30000)
+                                logger.debug("CF 处理后，目标元素已成功渲染")
+                            except Exception:
+                                logger.warning("CF 处理后，依然未检测到目标元素")
+
                     if need_resp:
-                        # 如果是 API 请求，优先尝试转为 JSON，否则返回 text
                         try:
-                            # 即使 content-type 没标明 json，也可以强制解析
                             res_data = await response.json()
                         except:
                             res_data = await response.text()
                         results.append(res_data)
                     else:
-                        # 原有逻辑：返回渲染后的全量 HTML
+                        # 此时再获取 content，确保是在最终渲染状态下提取
                         results.append(await page.content())
                 except Exception as e:
                     # 外层的大异常捕获
