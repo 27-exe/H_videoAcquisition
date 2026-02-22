@@ -1,4 +1,5 @@
 import asyncio,re,logging,os,aiohttp
+import random
 from lxml import html
 import hashlib
 import copy,json
@@ -74,46 +75,87 @@ class IwaraSpider(BaseSpider):
             urls.append(url)
         return urls
 
-    async def preprocess_response(self, urls:list) :       #一次访问预处理拿到下载页面链接和标题
-        # 有 CF
+    async def preprocess_response(self, urls: list):
+        """支持最多重试5次的首页预处理（含 fuck_cf + xpath 解析）"""
         v_name = []
         v_url = []
-        results = await fuck_cf(urls,  proxy_str=self.proxy_url,pro_name=self.pro_name,pro_word=self.pro_word,storage_state=self.state_path,select='.page-videoList .col-12.col-lg-9.order-2.order-lg-1 > div > div > div > a>img')
 
-        processed = make_result(urls, results)
+        MAX_RETRIES = 5
+        base_sleep = 5  # 基础等待秒数
 
-        try:
-            if not processed:
-                logger.warning("未能获取到任何页面结果")
-                return None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                logger.info(f"[预处理] 第 {attempt}/{MAX_RETRIES} 次尝试访问首页...")
 
-            for data in processed:
-                if data == 0: continue  # 跳过占位符
-                if isinstance(data, dict) and data.get("status") == "success":
-                    _html = data["content"]
-                    if not _html: continue
-                    tree = html.fromstring(_html)
-                    video_urls = tree.xpath(f'//a[@class="videoTeaser__thumbnail"]/@href')[0:30][::-1]
-                    video_names = tree.xpath(f'//a[@class="videoTeaser__title"]/@title')[0:30][::-1]
 
-                    for i in range(0,30):
-                        v_name.append(clean_filename(video_names[i]))
-                        v_url.append('https://www.iwara.tv'+ video_urls[i])
+                results = await fuck_cf(
+                    urls,
+                    proxy_str=self.proxy_url,
+                    pro_name=self.pro_name,
+                    pro_word=self.pro_word,
+                    storage_state=self.state_path,
+                    select='.page-videoList .col-12.col-lg-9.order-2.order-lg-1 > div > div > div > a>img'
+                )
 
-                    logger.debug(f'完成首页爬取{v_name}')
-                elif data.get("status") == "error":
-                    logger.warning(f'访问页面失败!{data["content"]}')
-                    raise Exception(f"Request failed: {data['content']}")
+                processed = make_result(urls, results)
+
+                if not processed:
+                    raise Exception("fuck_cf 返回为空")
+
+                # 清空本次尝试的结果，防止累加
+                v_name.clear()
+                v_url.clear()
+
+                success_count = 0
+                for data in processed:
+                    if data == 0:
+                        continue
+                    if isinstance(data, dict) and data.get("status") == "success":
+                        _html = data.get("content", "")
+                        if not _html:
+                            continue
+
+                        tree = html.fromstring(_html)
+
+                        # 提取视频链接和标题
+                        video_urls = tree.xpath('//a[@class="videoTeaser__thumbnail"]/@href')[0:30][::-1]
+                        video_names = tree.xpath('//a[@class="videoTeaser__title"]/@title')[0:30][::-1]
+
+                        for i in range(min(len(video_urls), len(video_names))):
+                            v_name.append(clean_filename(video_names[i]))
+                            v_url.append('https://www.iwara.tv' + video_urls[i])
+
+                        success_count += 1
+
+                    elif isinstance(data, dict) and data.get("status") == "error":
+                        logger.warning(f'页面返回错误: {data.get("content")}')
+
+                # ==================== 重试判定 ====================
+                # 成功标准：至少成功解析出 20 个视频（iwara 首页通常 30 个）
+                if len(v_url) >= 20:
+                    logger.info(f"✅ 第 {attempt} 次尝试成功！共提取 {len(v_url)} 个视频")
+                    return [v_name, v_url]
+
                 else:
-                    logger.warning(f"跳过无效数据 (类型: {type(data)}): {data}")
+                    logger.warning(f"⚠️ 第 {attempt} 次尝试只提取到 {len(v_url)} 个视频，准备重试...")
 
-            return [v_name, v_url]
+            except Exception as e:
+                logger.warning(f"❌ 第 {attempt} 次预处理失败: {e}")
 
-        except Exception as e:
-            self.error = e
-            logger.error(f'获取视频详细时出错: {e}', exc_info=True)
-            self.success = False
-            return []  # 出错返回空列表而不是 None，防止后续 crash
+            # 最后一次失败就不用等了
+            if attempt == MAX_RETRIES:
+                break
+
+            # 指数退避 + 随机抖动，防止被封
+            sleep_time = base_sleep * (2 ** (attempt - 1)) + random.uniform(1, 3)
+            logger.info(f"等待 {sleep_time:.1f} 秒后进行第 {attempt + 1} 次重试...")
+            await asyncio.sleep(sleep_time)
+
+        # ==================== 全部失败 ====================
+        logger.error(f"❌ 已重试 {MAX_RETRIES} 次，仍未能成功提取足够视频！")
+        self.success = False
+        self.error = "preprocess_response 重试 5 次后仍失败"
+        return []  # 返回空列表，让下游 parse 能优雅处理
 
     async def parse(self,dig):
         v_id = []
