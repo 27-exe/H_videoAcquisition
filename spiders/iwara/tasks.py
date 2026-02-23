@@ -82,7 +82,7 @@ async def do_iwara(client,db:DataBase):
 
         rank_list = [f'https://t.me/{vid_name}/{video_id}' for video_id in ch_ids][::-1]
         cover_paths = [os.path.join(cover_path, f"{video_id}.jpg") for video_id in id_lists[-5:]][::-1]
-        await send_top5(client, ch_id=pic_ch, ranks=rank_list, source='hanime1', paths=cover_paths)
+        await send_top5(client, ch_id=pic_ch, ranks=rank_list, source='iwara', paths=cover_paths)
     except Exception as e:
         logger.error(e, exc_info=True)
 
