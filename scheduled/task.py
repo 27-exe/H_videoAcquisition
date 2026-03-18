@@ -11,13 +11,13 @@ from spiders.iwara.tasks import do_iwara
 logger = logging.getLogger(__name__)
 
 def add_iwara(scheduler: AsyncIOScheduler,client,db) -> Job:
-    """加入每天 12:00 的 iwara 爬虫"""
+    """加入每天 14:00 的 iwara 爬虫"""
     return scheduler.add_job(
         do_iwara,
         args=(client, db),
-        trigger=CronTrigger(hour=12, minute=0, timezone="Asia/Shanghai"),
-        id="daily_iwara_12pm",
-        name="每日 iwara 任務 - 12:00",
+        trigger=CronTrigger(hour=14, minute=0, timezone="Asia/Shanghai"),
+        id="daily_iwara_14pm",
+        name="每日 iwara 任務 - 14:00",
         replace_existing=True,
         misfire_grace_time=1800,   # 允許延遲最多 30 分鐘
     )
