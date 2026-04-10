@@ -7,6 +7,21 @@ from utils.pic_utils import get_video_info_async
 from telethon.tl.types import InputMediaUploadedDocument, DocumentAttributeVideo, DocumentAttributeFilename
 logger = logging.getLogger(__name__)
 
+async def delete_messages(client, channel_id, message_ids):
+    """删除指定频道中的消息"""
+    if not message_ids:
+        return
+    try:
+        for msg_id in message_ids:
+            if msg_id and msg_id != 0:
+                try:
+                    await client.delete_messages(channel_id, msg_id)
+                except Exception as e:
+                    logger.warning(f"删除消息 {msg_id} 失败: {e}")
+        logger.info(f"成功删除 {len([m for m in message_ids if m and m != 0])} 条消息")
+    except Exception as e:
+        logger.error(f"删除消息过程出错: {e}")
+
 async def send_source_video(client, title, path, ch_id, mini_thumb_path,semaphore=None):  # 新增 semaphore 参数
     try:
         if path == 0:
@@ -92,10 +107,12 @@ async def send_video(client,title,video_id,url,top,path,channel_id,ch_name,ch_id
                 Button.url('点击播放视频', f'https://t.me/{ch_name}/{ch_id}'),
             ]
         ]
-        await client.send_file(f'{channel_id}', path, caption=cap,buttons=buttons)
+        msg = await client.send_file(f'{channel_id}', path, caption=cap,buttons=buttons)
         logger.debug(f'成功发送视频{title}的预览图到频道')
+        return msg.id  # 返回预览图消息ID
     except Exception as e:
         logger.error(f"发送预览时出错: {str(e)}")
+        return 0  # 发送失败返回0
     finally:
         if os.path.exists(path) :
             os.remove(path)
