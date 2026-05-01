@@ -75,7 +75,7 @@ class TaskManager:
         self.scheduler_started = True
 
         logger.info("定时器")
-        logger.info("  • iwara : 每天 12:00")
+        logger.info("  • iwara : 每天 14:00")
         logger.info("  • hanime1 : 每隔一天 16:00")
 
     def pause_hanime1(self):

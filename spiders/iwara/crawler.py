@@ -158,6 +158,15 @@ class IwaraSpider(BaseSpider):
         return []  # 返回空列表，让下游 parse 能优雅处理
 
     async def parse(self,dig):
+        if not dig or len(dig) < 2:
+            self.success = False
+            self.error = "preprocess_response 未返回有效数据"
+            logger.error(self.error)
+            return CrawlResult(
+                success=False,
+                error=self.error,
+                page_url=self.base_url,
+            )
         v_id = []
         api_url = []
         json_files = []

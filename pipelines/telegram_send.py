@@ -90,10 +90,12 @@ async def send_source_video(client, title, path, ch_id, mini_thumb_path,semaphor
         if path != 0:
             logger.debug("开始清理文件")
             try:
-                if os.path.exists(path) :
+                if os.path.exists(path):
                     os.remove(path)
+                    logger.debug(f"删除文件 {path}")
+                if os.path.exists(mini_thumb_path):
                     os.remove(mini_thumb_path)
-                    logger.debug(f"删除文件{path}{mini_thumb_path}")
+                    logger.debug(f"删除缩略图 {mini_thumb_path}")
             except Exception as e:
                 logger.error(f"删除文件失败 {path}: {e}")
 

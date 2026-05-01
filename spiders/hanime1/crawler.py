@@ -1,4 +1,4 @@
-import asyncio,re,logging
+import asyncio,re,logging,random
 from lxml import html
 from utils.request_utils import fuck_cf
 from utils.parse_utils import clean_filename,make_result
@@ -54,50 +54,68 @@ class Hanime1spider(BaseSpider):
             urls.append(url)
         return urls
 
-    async def preprocess_response(self, urls:list) -> list | None:       #一次访问预处理拿到下载页面链接和标题
-        # 有 CF
-        results = await fuck_cf(urls)
+    async def preprocess_response(self, urls:list) -> list | None:
+        MAX_RETRIES = 5
+        base_sleep = 5
 
-        processed = make_result(urls, results)
-        detail_msg = []
+        for attempt in range(1, MAX_RETRIES + 1):
+            logger.info(f"[预处理] 第 {attempt}/{MAX_RETRIES} 次尝试访问首页...")
 
-        try:
-            if not processed:
-                logger.warning("未能获取到任何页面结果")
-                return None
+            # 有 CF
+            results = await fuck_cf(urls)
 
-            for data in processed:
-                if data == 0: continue  # 跳过占位符
-                if isinstance(data, dict) and data.get("status") == "success":
-                    _html = data["content"]
-                    if not _html: continue
+            processed = make_result(urls, results)
+            detail_msg = []
 
-                    tree = html.fromstring(_html)
-                    for i in range(30, 0, -1):
-                        video_urls = tree.xpath(f"//*[@id='home-rows-wrapper']/div[3]/div/div/div[{i}]/div/a/@href")
-                        video_names = tree.xpath(f"//*[@id='home-rows-wrapper']/div[3]/div/div/div[{i}]/@title")
+            try:
+                if not processed:
+                    raise Exception("fuck_cf 返回为空")
 
-                        if video_urls and video_names:
-                            # 提取字符串
-                            v_url = video_urls[0]
-                            v_name = clean_filename(video_names[0])
+                success_count = 0
+                for data in processed:
+                    if data == 0:
+                        continue
+                    if isinstance(data, dict) and data.get("status") == "success":
+                        _html = data["content"]
+                        if not _html:
+                            continue
 
+                        tree = html.fromstring(_html)
+                        for i in range(30, 0, -1):
+                            video_urls = tree.xpath(f"//*[@id='home-rows-wrapper']/div[3]/div/div/div[{i}]/div/a/@href")
+                            video_names = tree.xpath(f"//*[@id='home-rows-wrapper']/div[3]/div/div/div[{i}]/@title")
 
-                            detail_msg.append([v_name, v_url])
-                            logger.debug(f'完成top{i}的爬取: {v_name}')
-                elif data.get("status") == "error":
-                    logger.warning(f'访问页面失败!{data["content"]}')
-                    raise Exception(f"Request failed: {data['content']}")
+                            if video_urls and video_names:
+                                v_url = video_urls[0]
+                                v_name = clean_filename(video_names[0])
+                                detail_msg.append([v_name, v_url])
+                                logger.debug(f'完成top{i}的爬取: {v_name}')
+
+                        success_count += 1
+
+                    elif data.get("status") == "error":
+                        logger.warning(f'访问页面失败!{data["content"]}')
+
+                if len(detail_msg) >= 20:
+                    logger.info(f"✅ 第 {attempt} 次尝试成功！共提取 {len(detail_msg)} 个视频")
+                    return detail_msg
                 else:
-                    logger.warning(f"跳过无效数据 (类型: {type(data)}): {data}")
+                    logger.warning(f"⚠️ 第 {attempt} 次尝试只提取到 {len(detail_msg)} 个视频，准备重试...")
 
-            return detail_msg
+            except Exception as e:
+                logger.warning(f"❌ 第 {attempt} 次预处理失败: {e}")
 
-        except Exception as e:
-            self.error = e
-            logger.error(f'获取视频详细时出错: {e}', exc_info=True)
-            self.success = False
-            return []  # 出错返回空列表而不是 None，防止后续 crash
+            if attempt == MAX_RETRIES:
+                break
+
+            sleep_time = base_sleep * (2 ** (attempt - 1)) + random.uniform(1, 3)
+            logger.info(f"等待 {sleep_time:.1f} 秒后进行第 {attempt + 1} 次重试...")
+            await asyncio.sleep(sleep_time)
+
+        logger.error(f"❌ 已重试 {MAX_RETRIES} 次，仍未能成功提取足够视频！")
+        self.success = False
+        self.error = "preprocess_response 重试 5 次后仍失败"
+        return []  # 出错返回空列表，防止后续 crash
 
     async def parse(self, detail_msg: list):
         id_list = []

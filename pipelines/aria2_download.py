@@ -89,7 +89,15 @@ async def _single_download(aria, url: str, dst: str, video_name: str, max_retrie
             await asyncio.sleep(3)
 
     logger.error(f"[{video_name}] 已达到最大重试次数 {max_retries}，最终失败。")
-    return False
+    # 清理残留的部分下载文件
+    for f in [dst, dst + ".aria2"]:
+        if os.path.exists(f):
+            try:
+                os.remove(f)
+                logger.debug(f"[{video_name}] 已清理残留文件: {f}")
+            except OSError:
+                pass
+    return 0
 
 async def start_batch_download(urls: list[str], download_dir: str, names: list[str]):
     cfg =load_json('aria2.json')
