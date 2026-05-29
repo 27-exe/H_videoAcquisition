@@ -30,6 +30,7 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
     video_ch = cfg['video_channel']
     pic_ch = cfg['pic_channel']
     vid_name = re.sub(r'^@', '', video_ch)
+    max_download_failures = 3
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -59,6 +60,7 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
             # 用于记录本轮发送的消息信息
             video_ch_ids = []  # 视频频道消息ID（来自send_source_video或DB查询）
             preview_ch_ids = []  # 预览图频道消息ID（来自send_video）
+            download_failures = []
 
             date = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
 
@@ -72,6 +74,22 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
 
                     # 下载视频
                     video_paths = await start_batch_download(down_url_list, video_path, na_list)
+                    batch_failures = [
+                        (vid, title)
+                        for down_url, vid_path, vid, title in zip(down_url_list, video_paths, id_list, na_list)
+                        if down_url != 0 and vid_path == 0
+                    ]
+                    download_failures.extend(batch_failures)
+
+                    if batch_failures:
+                        logger.warning(
+                            f"本批次有 {len(batch_failures)} 个 Iwara 视频下载失败，"
+                            f"本轮累计 {len(download_failures)}/{max_download_failures}"
+                        )
+
+                    if len(download_failures) > max_download_failures:
+                        raise RuntimeError(f"Iwara 本轮下载失败超过 {max_download_failures} 个，触发任务重试")
+
                     mini_thumbs = [os.path.join(cover_path, f"{vid_id}_thumb.jpg") for vid_id in id_list]
 
                     # 生成缩略图
@@ -83,8 +101,11 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
                     await asyncio.gather(*pic_list)
 
                     # 上传源视频
-                    for ti, vid_path, mini_path, v_id in zip(na_list, video_paths, mini_thumbs, id_list):
-                        if vid_path == 0:
+                    for ti, vid_path, mini_path, v_id, down_url in zip(na_list, video_paths, mini_thumbs, id_list, down_url_list):
+                        if down_url != 0 and vid_path == 0:
+                            logger.warning(f"跳过下载失败的 Iwara 视频: {v_id} - {ti}")
+                            ch_id = 0
+                        elif vid_path == 0:
                             # 视频已存在，从数据库获取之前保存的频道消息 ID
                             info = await db.get_iwara_info(v_id)
                             ch_id = info[1] if info != 0 else 0
@@ -114,6 +135,9 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
                     # 发送预览图
                     for vid, urls, num, prv_pa, tit, ch__id in zip(id_list, url_list, range(30 - i, 25 - i, -1),
                                                                     text_path, na_list, video_batch_ids):
+                        if not prv_pa or ch__id == 0:
+                            logger.warning(f"跳过预览发送: {vid} - {tit}")
+                            continue
                         preview_msg_id = await send_video(client=client, video_id=vid, url=urls, top=num, path=prv_pa, channel_id=pic_ch,
                                        title=tit, ch_name=vid_name, ch_id=ch__id)
                         if preview_msg_id != 0:
@@ -121,9 +145,10 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
 
                 # 检查本轮是否成功发送了30条消息
                 successful_preview_count = len([msg_id for msg_id in preview_ch_ids if msg_id != 0])
+                expected_preview_count = 30 - len(download_failures)
 
-                if successful_preview_count < 30:
-                    logger.warning(f"第 {attempt} 次尝试只成功发送了 {successful_preview_count} 条预览图（目标：30条）")
+                if successful_preview_count < expected_preview_count:
+                    logger.warning(f"第 {attempt} 次尝试只成功发送了 {successful_preview_count} 条预览图（目标：{expected_preview_count}条）")
 
 
                     # 只删除预览图频道的消息ID
@@ -137,11 +162,11 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
                         await asyncio.sleep(wait_seconds)
                         continue
                     else:
-                        logger.error('已达到最大重试次数，但仍未成功发送30条预览图')
+                        logger.error(f'已达到最大重试次数，但仍未成功发送足够预览图（目标：{expected_preview_count}条）')
                         return False
 
                 # 本轮成功，发送 Top 5
-                logger.info(f"✅ 第 {attempt} 次尝试成功！已发送 {successful_preview_count} 条消息")
+                logger.info(f"✅ 第 {attempt} 次尝试成功！已发送 {successful_preview_count} 条消息，跳过 {len(download_failures)} 个下载失败视频")
                 rank_list = [f'https://t.me/{vid_name}/{video_id}' for video_id in video_ch_ids if video_id != 0][::-1]
                 cover_paths = [os.path.join(cover_path, f"{video_id}.jpg") for video_id in id_lists[-5:]][::-1]
                 await send_top5(client, ch_id=pic_ch, ranks=rank_list, source='iwara', paths=cover_paths)
@@ -180,5 +205,4 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
                 return False
 
     return False
-
 

@@ -102,6 +102,9 @@ async def send_source_video(client, title, path, ch_id, mini_thumb_path,semaphor
 
 async def send_video(client,title,video_id,url,top,path,channel_id,ch_name,ch_id):
     try:
+        if not path or not os.path.exists(path):
+            logger.warning(f"预览图不存在，跳过发送: {video_id} - {path}")
+            return 0
         cap = f'日期:{datetime.now(timezone(timedelta(hours=8))).date().isoformat()}\n位次: {top}\n标题:{title}'
         buttons = [
             [
@@ -116,7 +119,7 @@ async def send_video(client,title,video_id,url,top,path,channel_id,ch_name,ch_id
         logger.error(f"发送预览时出错: {str(e)}")
         return 0  # 发送失败返回0
     finally:
-        if os.path.exists(path) :
+        if path and os.path.exists(path) :
             os.remove(path)
             logger.debug('成功删除预览图文件')
 
