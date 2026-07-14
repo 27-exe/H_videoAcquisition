@@ -8,7 +8,7 @@ Requires=ssh-tunnel.service
 [Service]
 Type=simple
 User=27exe
-WorkingDirectory=/home/27exe/video/H_videoAcquisition
+WorkingDirectory=/home/27exe/video/h_video/H_videoAcquisition
 EnvironmentFile=/etc/videoAcq/bot.env
 ExecStart=/home/27exe/video/h_vi/bin/python main.py
 Restart=on-failure
