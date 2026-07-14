@@ -1,0 +1,25 @@
+[Unit]
+Description=videoAcq bot (US) - dual-VPS, async bot via HK crawler
+Documentation=https://github.com/27-exe/videoAcquisition
+After=network-online.target ssh-tunnel.service
+Wants=network-online.target
+Requires=ssh-tunnel.service
+
+[Service]
+Type=simple
+User=27exe
+WorkingDirectory=/home/27exe/video/H_videoAcquisition
+EnvironmentFile=/etc/videoAcq/bot.env
+ExecStart=/home/27exe/video/h_vi/bin/python main.py
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=600
+StartLimitBurst=20
+# Memory cap same as old single-VPS configuration (currently 4GB swap,
+# ~1.9GB RAM): we don't add more since async bot launches only on schedule,
+# and now it's HK camoufox that uses memory, not US.
+MemoryMax=2G
+MemorySwapMax=1G
+
+[Install]
+WantedBy=multi-user.target

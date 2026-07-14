@@ -1,0 +1,27 @@
+[Unit]
+Description=US -> HK reverse SSH tunnel for videoAcq crawler
+Documentation=https://github.com/27-exe/videoAcquisition
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=27exe
+Environment=SSH_AUTH_SOCK=/tmp/ssh-agent-27exe
+# ExitOnForwardFailure=yes — ssh exits immediately if 8765 unreachable on HK end,
+# letting systemd notice and Restart. Without this, ssh -f can succeed without
+# listener and tunnel silently dead (only refresh timeout via ServerAlive).
+ExecStart=/usr/bin/ssh \
+  -N \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=20 \
+  -o ServerAliveCountMax=3 \
+  -o StrictHostKeyChecking=accept-new \
+  -L 17650:127.0.0.1:8765 vps
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Install]
+WantedBy=multi-user.target
