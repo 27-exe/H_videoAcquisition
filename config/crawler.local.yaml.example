@@ -1,0 +1,18 @@
+# videoAcq-crawler 本地配置样板 (不入 git, 复制为 crawler.local.yaml)
+# 用于 US bot 调 HK crawler endpoint 的连接信息
+#
+# 重要: bearer token 不入 yaml, 通过环境变量注入 (CRAWLER_BEARER_TOKEN)
+#       ssh-tunnel 端口默认 17650, 在 US 本地开; HK :8765 不直接对外暴露
+
+crawler:
+  url: http://127.0.0.1:17650           # US 本地, 经 ssh-tunnel 转发到 HK :8765
+  timeout_seconds: 60
+  retry_count: 2
+
+# 本地 camoufox 浏览器缓存路径 (playwright + camoufox 共用)
+browser:
+  cache_dir: ~/.cache/camoufox
+
+# Fallback 行为: 1=本地 camoufox, 0=爬取失败跳过整个任务
+fallback:
+  local_browser: 0

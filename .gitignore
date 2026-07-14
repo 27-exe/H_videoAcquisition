@@ -6,6 +6,7 @@ __pycache__/
 .idea
 *.exe
 .venv
+.hermes/
 config/token.json
 config/aria2.json
 config/bot_cfg.json
@@ -14,3 +15,6 @@ config/iwara.yaml
 *.token.json
 download/
 config/auth
+list/
+*.local.yaml
+*.local.json

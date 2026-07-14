@@ -1,0 +1,12 @@
+# videoAcq-telegram_send 本地配置样板 (不入 git, 复制为 telegram_send.local.yaml)
+# US bot hotfix 中"机场推广按钮"位置, 默认空 = 不渲染任何外部链接
+#
+# 字段留空 = 完全关闭推广按钮行
+# 填了 = 在 send_top5 末尾追加一个 row(Button.url)
+#
+# 注意: git push 前不要带真 URL, .gitignore 已加 *.local.yaml
+
+promotion:
+  label: ""          # 按钮文字, 默认空
+  url: ""            # 按钮 URL,   默认空
+  enabled: false     # 总开关, 默认 false

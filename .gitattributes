@@ -1,0 +1,3 @@
+# Force git to treat these files as text even when BOM is detected
+# (helps with files that have changed encoding since being added)
+requirements.txt text
