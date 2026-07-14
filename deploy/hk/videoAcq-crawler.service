@@ -1,0 +1,34 @@
+[Unit]
+Description=videoAcq crawler (HK) - per-request browser API
+Documentation=https://github.com/27-exe/videoAcquisition
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=a27exe
+Group=a27exe
+WorkingDirectory=/home/a27exe/Projects/code/project/videoAcquisition-hk
+EnvironmentFile=/etc/videoAcq/crawler.env
+ExecStart=/home/a27exe/Projects/code/project/videoAcquisition-hk/.venv/bin/python \
+  -m uvicorn crawler_service.app:app \
+  --host 127.0.0.1 \
+  --port 8765 \
+  --workers 1 \
+  --log-level info
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=120
+StartLimitBurst=10
+# Memory limits: per plan, peak ~620MB during single camoufox req.
+# Allow 2G burst for the rare multi-browser case, swap 2G extension.
+MemoryMax=2G
+MemorySwapMax=2G
+# Security: keep system partition; deny /home/* write except working dir.
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
