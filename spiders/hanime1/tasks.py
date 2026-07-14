@@ -7,6 +7,7 @@ from spiders.base_spider import CrawlResult
 from utils.pic_utils import generate_thumbnail,write_text_on_image
 from datetime import datetime, timezone, timedelta
 from pipelines.data_base import DataBase
+from utils.hk_crawler_client import fetch_via_hk_crawler, HKCrawlerError
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,65 @@ video_path = os.path.join(spider_path, "video")
 cover_path = os.path.join(spider_path, "cover")
 preview_path = os.path.join(spider_path, "preview")
 
+
+def _dual_mode_enabled() -> bool:
+    """True when both CRAWLER_URL and CRAWLER_BEARER_TOKEN env vars are set.
+
+    See spiders/iwara/tasks.py for the same gate. Without both env vars, bot
+    runs the original local AsyncCamoufox path only — preserving the
+    historical single-VPS behavior.
+    """
+    return bool(os.environ.get("CRAWLER_URL")) and bool(os.environ.get("CRAWLER_BEARER_TOKEN"))
+
+
+def _fallback_local_allowed() -> bool:
+    """Whether to run local AsyncCamoufox if HK crawler is unreachable.
+
+    Default True (US bot has local browser installed for legacy path).
+    Set FALLBACK_LOCAL_BROWSER=0 to disable fallback and skip the task on
+    HK failure (next cron tick retries).
+    """
+    val = os.environ.get("FALLBACK_LOCAL_BROWSER", "1")
+    return val not in ("0", "false", "False", "no")
+
+
+async def _fetch_hanime1_via_hk(cfg) -> "CrawlResult | None":
+    """Phase 2 dual-VPS entry point: ask HK crawler for hanime1 items.
+
+    Returns CrawlResult whose .data is shaped like Hanime1spider.do_job(): a
+    list of (title, source_url) tuples (NOT a [name_list, source_url_list]
+    like iwara). .detail = download_urls, .extra = id list (parsed by
+    do_hanime1 via re.search on the source_url).
+    """
+    try:
+        items = fetch_via_hk_crawler(
+            "hanime1",
+            {
+                "page": int(cfg.get("page", 1)),
+                "limit": int(cfg.get("limit", 30)),
+                "sort": cfg.get("sort", "today-popular"),
+            },
+        )
+    except HKCrawlerError as e:
+        logger.warning(
+            f"hk crawler hanime1 unavailable: {e}; "
+            f"fallback_local_browser={_fallback_local_allowed()}"
+        )
+        return None
+
+    data_list = [
+        (it.get("title", ""), it.get("source_url", ""))
+        for it in items
+    ]
+    download_urls = [it.get("download_url", 0) for it in items]
+    return CrawlResult(
+        success=True,
+        data=data_list,
+        detail=download_urls,
+        extra=None,
+        crawled_at=datetime.now(timezone(timedelta(hours=8))).date().isoformat(),
+        page_url="<hk-crawler>",
+    )
 
 
 async def do_hanime1(client, db: DataBase, max_retries: int = 3, retry_wait_minutes: int = 10):
@@ -33,12 +93,47 @@ async def do_hanime1(client, db: DataBase, max_retries: int = 3, retry_wait_minu
     pic_ch = cfg['pic_channel']
     vid_name = re.sub(r'^@', '', video_ch)
 
+    dual_mode = _dual_mode_enabled()
+
     for attempt in range(1, max_retries + 1):
         try:
             logger.info(f"=========== Hanime1 爬取任务 - 第 {attempt}/{max_retries} 次尝试 ===========")
 
-            hm = Hanime1spider(cfg, db)
-            spider: CrawlResult = await hm.do_job()
+            spider: CrawlResult | None = None
+            error: str | None = None
+
+            if dual_mode:
+                spider = await _fetch_hanime1_via_hk(cfg)
+                if spider is None:
+                    if _fallback_local_allowed():
+                        logger.info("falling back to local AsyncCamoufox for hanime1")
+                        hm = Hanime1spider(cfg, db)
+                        spider = await hm.do_job()
+                    else:
+                        logger.error(
+                            "HK crawler unreachable and FALLBACK_LOCAL_BROWSER=0; "
+                            "skipping this attempt"
+                        )
+                        error = "hk_unreachable_no_fallback"
+            else:
+                hm = Hanime1spider(cfg, db)
+                spider = await hm.do_job()
+
+            if spider is None:
+                if dual_mode and error is None:
+                    error = "hk_crawler_returned_none"
+                if error is None:
+                    error = "spider_returned_none"
+                logger.warning(f'第 {attempt} 次：未能正确爬取，原因: {error}')
+                if attempt < max_retries:
+                    wait_seconds = retry_wait_minutes * 60
+                    logger.info(f"将在 {retry_wait_minutes} 分钟后进行第 {attempt + 1} 次重试...")
+                    await asyncio.sleep(wait_seconds)
+                    continue
+                else:
+                    logger.error('已达到最大重试次数，任务失败')
+                    return False
+
             if not spider.success:
                 logger.warning(f'第 {attempt} 次：未能正确爬取，原因: {spider.error}')
                 if attempt < max_retries:
