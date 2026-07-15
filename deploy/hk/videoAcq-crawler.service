@@ -3,6 +3,9 @@ Description=videoAcq crawler (HK) - per-request browser API
 Documentation=https://github.com/27-exe/videoAcquisition
 After=network-online.target
 Wants=network-online.target
+# Restart rate limit (older systemd needs this in [Unit], not [Service])
+StartLimitIntervalSec=120
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -18,15 +21,16 @@ ExecStart=/home/a27exe/Projects/code/project/videoAcquisition-hk/.venv/bin/pytho
   --log-level info
 Restart=on-failure
 RestartSec=5
-StartLimitIntervalSec=120
-StartLimitBurst=10
 # Memory limits: per plan, peak ~620MB during single camoufox req.
 # Allow 2G burst for the rare multi-browser case, swap 2G extension.
 MemoryMax=2G
 MemorySwapMax=2G
 # Security: keep system partition; deny /home/* write except working dir.
-ProtectSystem=strict
+ProtectSystem=full
 ProtectHome=read-only
+# But allow the camoufox firefox process to write its user cache
+# (otherwise dconf / dbus / etc fail with "Read-only file system").
+ReadWritePaths=/home/a27exe/.cache /home/a27exe/.config
 PrivateTmp=true
 NoNewPrivileges=true
 
