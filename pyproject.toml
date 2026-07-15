@@ -1,5 +1,8 @@
 [project]
 name = "videoacquisition"
 version = "0.1.0"
-requires-python = ">=3.13"
+# uv-managed venv on US uses system python 3.11.2; HK uses uv 3.13.x.
+# Allow >=3.11 to support both.  This is the lowest common denominator
+# the repo is known to work on; tighter pinning happens in CI if needed.
+requires-python = ">=3.11"
 dependencies = []
