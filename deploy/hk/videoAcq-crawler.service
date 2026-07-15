@@ -13,7 +13,8 @@ User=a27exe
 Group=a27exe
 WorkingDirectory=/home/a27exe/Projects/code/project/videoAcquisition-hk
 EnvironmentFile=/etc/videoAcq/crawler.env
-ExecStart=/home/a27exe/Projects/code/project/videoAcquisition-hk/.venv/bin/python \
+ExecStart=/usr/bin/xvfb-run -a --server-args="-screen 0 1024x768x24" \
+  /home/a27exe/Projects/code/project/videoAcquisition-hk/.venv/bin/python \
   -m uvicorn crawler_service.app:app \
   --host 127.0.0.1 \
   --port 8765 \
