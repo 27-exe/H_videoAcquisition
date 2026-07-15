@@ -230,24 +230,34 @@ async def crawl_iwara(cfg: dict) -> dict:
 
             api_results: list[dict | None] = [None] * len(vid_ids)
 
-            # 2a) fetch apiq.iwara.tv/video/{id} in-browser (CF bypass)
+            # 2a) fetch apiq.iwara.tv/video/{id} in-browser (CF bypass).
+            # Each call opens its own page, but we launch 5-at-a-time concurrently
+            # within one browser context — original spider's pattern.
+            async def _fetch_api(vid: str) -> dict | None:
+                api_url = f"{IWARA_API}/{vid}"
+                try:
+                    api_page, _ = await open_page(context, api_url, goto_timeout_ms=30000)
+                    content = await api_page.content()
+                    await api_page.close()
+                    parsed = _parse_api_json(content)
+                    return parsed[0] if parsed else None
+                except Exception:
+                    return None
+
             for batch_start in range(0, len(vid_ids), _API_BATCH_SIZE):
                 batch_end = min(batch_start + _API_BATCH_SIZE, len(vid_ids))
                 batch_ids = vid_ids[batch_start:batch_end]
-
-                for i in range(batch_start, batch_end):
-                    vid = vid_ids[i]
-                    try:
-                        api_url = f"{IWARA_API}/{vid}"
-                        api_page, _ = await open_page(context, api_url, goto_timeout_ms=30000)
-                        content = await api_page.content()
-                        await api_page.close()
-                        parsed = _parse_api_json(content)
-                        if parsed:
-                            api_results[i] = parsed[0]
-                        else:
-                            api_results[i] = None
-                    except Exception as e:
+                results = await asyncio.gather(
+                    *[_fetch_api(vid) for vid in batch_ids],
+                    return_exceptions=True,
+                )
+                for i, res in zip(range(batch_start, batch_end), results):
+                    if isinstance(res, Exception):
+                        print(f"DL_FETCH_API_EXC: vid_idx={i} {type(res).__name__}: {res}", flush=True)
+                        api_results[i] = None
+                    elif isinstance(res, dict):
+                        api_results[i] = res
+                    else:
                         api_results[i] = None
 
                 if batch_end < len(vid_ids):
