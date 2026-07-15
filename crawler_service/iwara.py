@@ -218,7 +218,7 @@ async def crawl_iwara(cfg: dict) -> dict:
 
             # ── 2) resolve download URLs (batched) ──────────────────────
             vid_ids = [it["id"] for it in items]
-            logger.info(f"iwara: resolving download urls for {len(vid_ids)} items: {vid_ids}")
+            print("DL_RESOLVE_START", flush=True)  #  for {len(vid_ids)} items: {vid_ids}")
 
             api_results: list[dict | None] = [None] * len(vid_ids)
 
@@ -231,19 +231,19 @@ async def crawl_iwara(cfg: dict) -> dict:
                     vid = vid_ids[i]
                     try:
                         api_url = f"{IWARA_API}/{vid}"
-                        logger.info(f"iwara fetching api: {api_url}")
+                        print("DL_FETCH_API:", flush=True)  #  {api_url}")
                         api_page, _ = await open_page(context, api_url, goto_timeout_ms=30000)
                         content = await api_page.content()
                         await api_page.close()
                         parsed = _parse_api_json(content)
                         if parsed:
                             api_results[i] = parsed[0]
-                            logger.info(f"iwara api parsed ok for vid={vid}: keys={list(parsed[0].keys())[:5]}")
+                            print("DL_PARSED_OK:", flush=True)  #  for vid={vid}: keys={list(parsed[0].keys())[:5]}")
                         else:
-                            logger.info(f"iwara api parsed empty for vid={vid}: content_len={len(content)} head={content[:120]}")
+                            print("DL_PARSED_EMPTY:", flush=True)  #  for vid={vid}: content_len={len(content)} head={content[:120]}")
                             api_results[i] = None
                     except Exception as e:
-                        logger.info(f"iwara api fetch FAILED for vid={vid}: {type(e).__name__}: {e}")
+                        print("DL_FETCH_FAILED:", flush=True)  #  for vid={vid}: {type(e).__name__}: {e}")
                         api_results[i] = None
 
                 if batch_end < len(vid_ids):
