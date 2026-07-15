@@ -4,17 +4,18 @@ Documentation=https://github.com/27-exe/videoAcquisition
 After=network-online.target ssh-tunnel.service
 Wants=network-online.target
 Requires=ssh-tunnel.service
+# Restart rate limit (older systemd needs this in [Unit], not [Service])
+StartLimitIntervalSec=600
+StartLimitBurst=20
 
 [Service]
 Type=simple
 User=27exe
-WorkingDirectory=/home/27exe/video/h_video/H_videoAcquisition
+WorkingDirectory=/home/27exe/video/H_videoAcquisition-hk
 EnvironmentFile=/etc/videoAcq/bot.env
-ExecStart=/home/27exe/video/h_vi/bin/python main.py
+ExecStart=/home/27exe/video/H_videoAcquisition-hk/.venv/bin/python main.py
 Restart=on-failure
 RestartSec=10
-StartLimitIntervalSec=600
-StartLimitBurst=20
 # Memory cap same as old single-VPS configuration (currently 4GB swap,
 # ~1.9GB RAM): we don't add more since async bot launches only on schedule,
 # and now it's HK camoufox that uses memory, not US.
