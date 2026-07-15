@@ -37,29 +37,55 @@ def _now_iso() -> str:
 
 
 def _parse_api_json(text: str) -> list[dict[str, Any]]:
-    """Try to parse a list of JSON objects from API response.
+    """Parse iwara API response (may be raw JSON or HTML-wrapped <pre>{...}</pre>).
 
-    iwara API returns a JSON array of file objects, but due to CF bypass
-    the page content may be wrapped in HTML or have an extra layer.
+    Returns a list of dicts — always a list so caller can index [0].
     """
+    import json
+
+    # 1) try raw JSON (text is clean)
     try:
-        import json
         data = json.loads(text)
         if isinstance(data, list):
             return data
-        return []
+        if isinstance(data, dict):
+            return [data]
     except Exception:
-        # try extracting JSON from inside <pre> or <body> (CF sometimes wraps)
-        m = re.search(r"(\[.*\])", text, re.DOTALL)
-        if m:
-            try:
-                import json
-                data = json.loads(m.group(1))
-                if isinstance(data, list):
-                    return data
-            except Exception:
-                pass
-        return []
+        pass
+
+    # 2) extract from <pre>...</pre> (iwara serves JSON inside HTML pre tag)
+    m = re.search(r"<pre>(.*?)</pre>", text, re.DOTALL)
+    if m:
+        try:
+            data = json.loads(m.group(1))
+            if isinstance(data, list):
+                return data
+            if isinstance(data, dict):
+                return [data]
+        except Exception:
+            pass
+
+    # 3) try array regex
+    m = re.search(r"(\[.*\])", text, re.DOTALL)
+    if m:
+        try:
+            data = json.loads(m.group(1))
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+
+    # 4) try object regex
+    m = re.search(r"(\{.*\})", text, re.DOTALL)
+    if m:
+        try:
+            data = json.loads(m.group(1))
+            if isinstance(data, dict):
+                return [data]
+        except Exception:
+            pass
+
+    return []
 
 
 async def _resolve_one_download(
