@@ -226,13 +226,19 @@ async def crawl_iwara(cfg: dict) -> dict:
                     vid = vid_ids[i]
                     try:
                         api_url = f"{IWARA_API}/{vid}"
+                        logger.info(f"iwara fetching api: {api_url}")
                         api_page, _ = await open_page(context, api_url, goto_timeout_ms=30000)
                         content = await api_page.content()
                         await api_page.close()
                         parsed = _parse_api_json(content)
-                        api_results[i] = parsed[0] if parsed else None
+                        if parsed:
+                            api_results[i] = parsed[0]
+                            logger.info(f"iwara api parsed ok for vid={vid}: keys={list(parsed[0].keys())[:5]}")
+                        else:
+                            logger.info(f"iwara api parsed empty for vid={vid}: content_len={len(content)} head={content[:120]}")
+                            api_results[i] = None
                     except Exception as e:
-                        logger.debug(f"iwara api fetch failed for vid={vid}: {e}")
+                        logger.info(f"iwara api fetch FAILED for vid={vid}: {type(e).__name__}: {e}")
                         api_results[i] = None
 
                 if batch_end < len(vid_ids):
