@@ -102,6 +102,9 @@ async def _resolve_one_download(
     if not file_url or not file_id:
         return 0
 
+    # unescape HTML entities (&amp; -> &) leaked into JSON pre content
+    file_url = _html.unescape(file_url)
+
     # extract expires from fileUrl (e.g. "...?expires=1234567890&..." )
     m = re.search(r"[?&]expires=(\d+)", file_url)
     if not m:
