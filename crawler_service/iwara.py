@@ -90,9 +90,14 @@ def _parse_api_json(text: str) -> list[dict[str, Any]]:
 
 
 async def _resolve_one_download(
-    session: aiohttp.ClientSession, api_file: dict[str, Any]
+    session: aiohttp.ClientSession, api_file: dict[str, Any],
+    timeout: float = 10.0,
 ) -> str | int:
-    """Deobfuscate a single iwara API file object, return download URL or 0."""
+    """Deobfuscate a single iwara API file object, return download URL or 0.
+
+    timeout (seconds) caps the fileUrl HTTP request — bad/expired items
+    fail fast and return 0 instead of hanging the whole batch.
+    """
     if not api_file:
         return 0
     try:
@@ -103,7 +108,7 @@ async def _resolve_one_download(
     if not file_url or not file_id:
         return 0
 
-    # unescape HTML entities (&amp; -> &) leaked into JSON pre content
+    # unescape HTML entities (&amp; → &) leaked into JSON <pre> content
     file_url = _html.unescape(file_url)
 
     # extract expires from fileUrl (e.g. "...?expires=1234567890&..." )
@@ -116,11 +121,14 @@ async def _resolve_one_download(
     t_hash = hashlib.sha1(sha_key.encode()).hexdigest()
 
     try:
-        async with session.get(file_url, headers={"X-Version": t_hash}) as resp:
+        async with session.get(
+            file_url, headers={"X-Version": t_hash},
+            timeout=aiohttp.ClientTimeout(total=timeout),
+        ) as resp:
             resp.raise_for_status()
             data = await resp.json()
     except Exception as e:
-        logger.debug(f"iwara deobfuscation failed for id={file_id}: {e}")
+        print(f"DL_DEOBF_REQ_FAIL: id={file_id} {type(e).__name__}: {e}", flush=True)
         return 0
 
     if not isinstance(data, list):
@@ -219,7 +227,6 @@ async def crawl_iwara(cfg: dict) -> dict:
 
             # ── 2) resolve download URLs (batched) ──────────────────────
             vid_ids = [it["id"] for it in items]
-            print("DL_RESOLVE_START", flush=True)  #  for {len(vid_ids)} items: {vid_ids}")
 
             api_results: list[dict | None] = [None] * len(vid_ids)
 
@@ -232,30 +239,38 @@ async def crawl_iwara(cfg: dict) -> dict:
                     vid = vid_ids[i]
                     try:
                         api_url = f"{IWARA_API}/{vid}"
-                        print("DL_FETCH_API:", flush=True)  #  {api_url}")
                         api_page, _ = await open_page(context, api_url, goto_timeout_ms=30000)
                         content = await api_page.content()
                         await api_page.close()
                         parsed = _parse_api_json(content)
                         if parsed:
                             api_results[i] = parsed[0]
-                            print("DL_PARSED_OK:", flush=True)  #  for vid={vid}: keys={list(parsed[0].keys())[:5]}")
                         else:
-                            print("DL_PARSED_EMPTY:", flush=True)  #  for vid={vid}: content_len={len(content)} head={content[:120]}")
                             api_results[i] = None
                     except Exception as e:
-                        print("DL_FETCH_FAILED:", flush=True)  #  for vid={vid}: {type(e).__name__}: {e}")
                         api_results[i] = None
 
                 if batch_end < len(vid_ids):
                     await asyncio.sleep(_API_BATCH_DELAY)
 
-            # 2b) deobfuscate with aiohttp (pure HTTP, no browser)
+            # 2b) deobfuscate with aiohttp (pure HTTP, no browser) in parallel
+            # batched 5-at-a-time with aiohttp timeout to fail fast on bad items
+            _DEOBF_TIMEOUT = 10  # seconds per fileUrl HTTP request
             async with aiohttp.ClientSession() as http_session:
-                for i, api_file in enumerate(api_results):
-                    durl = await _resolve_one_download(http_session, api_file)
-                    items[i]["download_url"] = durl if isinstance(durl, str) else ""
-                    if i > 0 and i % _API_BATCH_SIZE == 0 and i + 1 < len(api_results):
+                for batch_start in range(0, len(api_results), _API_BATCH_SIZE):
+                    batch_end = min(batch_start + _API_BATCH_SIZE, len(api_results))
+                    tasks = [
+                        _resolve_one_download(http_session, api_file, timeout=_DEOBF_TIMEOUT)
+                        for api_file in api_results[batch_start:batch_end]
+                    ]
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    for i, res in zip(range(batch_start, batch_end), results):
+                        if isinstance(res, Exception):
+                            print(f"DL_DEOBF_EXC: vid_idx={i} {type(res).__name__}: {res}", flush=True)
+                            items[i]["download_url"] = ""
+                        else:
+                            items[i]["download_url"] = res if isinstance(res, str) else ""
+                    if batch_end < len(api_results):
                         await asyncio.sleep(_API_BATCH_DELAY)
 
             # filter: items without a download_url become 0 (US bot will skip)
