@@ -3,6 +3,9 @@ Description=US -> HK reverse SSH tunnel for videoAcq crawler
 Documentation=https://github.com/27-exe/videoAcquisition
 After=network-online.target
 Wants=network-online.target
+# Restart rate limit (older systemd needs this in [Unit], not [Service])
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -20,8 +23,6 @@ ExecStart=/usr/bin/ssh \
   -L 17650:127.0.0.1:8765 vps
 Restart=on-failure
 RestartSec=30
-StartLimitIntervalSec=300
-StartLimitBurst=10
 
 [Install]
 WantedBy=multi-user.target

@@ -17,7 +17,7 @@ from playwright_captcha.utils.camoufox_add_init_script.add_init_script import ge
 logger = logging.getLogger(__name__)
 
 ADDON_PATH = get_addon_path()
-MAX_CONCURRENT_BROWSERS = 1  # HK single-request mode per plan §3
+MAX_CONCURRENT_BROWSERS = 3  # HK-side per-process browser cap; matches utils/request_utils.py default
 
 # Reuse addon across calls (read-only)
 _addon_abs = os.path.abspath(ADDON_PATH)

@@ -7,6 +7,14 @@ Endpoints per plan §2:
 - POST /shutdown        (bearer-auth; dev only; gated behind env)
 
 Each crawl endpoint opens one AsyncCamoufox per request, returns CrawlResult.
+
+Concurrency model:
+- Single uvicorn worker (--workers 1) to keep this single-process.
+- Module-level asyncio.Semaphore(MAX_CONCURRENT_BROWSERS) caps the number
+  of in-flight camoufox instances in this process.  Requests beyond the
+  cap await the semaphore (queue at FastAPI/ASGI layer).
+- Per-process memory ~620MB per active firefox; with cap=3 and HK's 3.8G
+  RAM, this is tight but workable.  swap 4G (set up in phase A) absorbs spikes.
 """
 import asyncio
 import logging
@@ -20,8 +28,13 @@ from fastapi.responses import JSONResponse
 from .auth import require_bearer
 from .iwara import crawl_iwara
 from .hanime1 import crawl_hanime1
+from .browser import MAX_CONCURRENT_BROWSERS
 
 logger = logging.getLogger(__name__)
+
+# Module-level cap on in-flight camoufox instances.  Read once at import;
+# changing MAX_CONCURRENT_BROWSERS at runtime has no effect.
+_BROWSER_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_BROWSERS)
 
 app = FastAPI(
     title="videoAcq crawler (HK)",
@@ -50,8 +63,13 @@ async def healthcheck() -> dict[str, Any]:
 async def crawl_iwara_endpoint(body: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be a JSON object")
-    logger.info(f"crawl/iwara request: {body}")
-    result = await crawl_iwara(body)
+    async with _BROWSER_SEMAPHORE:
+        logger.info(f"crawl/iwara acquired semaphore, request: {body}")
+        result = await crawl_iwara(body)
+    logger.info(
+        f"crawl/iwara done ok={result.get('ok')} items={len(result.get('items', []))} "
+        f"elapsed={result.get('elapsed_ms')}ms"
+    )
     return JSONResponse(content=result, status_code=200 if result.get("ok") else 502)
 
 
@@ -59,8 +77,13 @@ async def crawl_iwara_endpoint(body: dict[str, Any]) -> dict[str, Any]:
 async def crawl_hanime1_endpoint(body: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be a JSON object")
-    logger.info(f"crawl/hanime1 request: {body}")
-    result = await crawl_hanime1(body)
+    async with _BROWSER_SEMAPHORE:
+        logger.info(f"crawl/hanime1 acquired semaphore, request: {body}")
+        result = await crawl_hanime1(body)
+    logger.info(
+        f"crawl/hanime1 done ok={result.get('ok')} items={len(result.get('items', []))} "
+        f"elapsed={result.get('elapsed_ms')}ms"
+    )
     return JSONResponse(content=result, status_code=200 if result.get("ok") else 502)
 
 
