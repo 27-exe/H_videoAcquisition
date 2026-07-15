@@ -215,6 +215,8 @@ async def crawl_iwara(cfg: dict) -> dict:
 
             # ── 2) resolve download URLs (batched) ──────────────────────
             vid_ids = [it["id"] for it in items]
+            logger.info(f"iwara: resolving download urls for {len(vid_ids)} items: {vid_ids}")
+
             api_results: list[dict | None] = [None] * len(vid_ids)
 
             # 2a) fetch apiq.iwara.tv/video/{id} in-browser (CF bypass)
