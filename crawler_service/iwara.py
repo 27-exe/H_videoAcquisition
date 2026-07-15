@@ -93,13 +93,10 @@ async def crawl_iwara(cfg: dict) -> dict:
                     break
 
             if not items:
-                return {
-                    "ok": False,
-                    "source": "iwara",
-                    "error": "no_videos_found",
-                    "message": "list page parsed empty (CF block or layout drift)",
-                    "elapsed_ms": int((datetime.now() - started).total_seconds() * 1000),
-                }
+                # "no videos" \u662f\u5408\u6cd5\u7ed3\u679c (\u4eca\u5929\u5217\u8868\u9875\u7a7a\u3001\u6216\u5173\u952e\u8bcd\u8fc7\u51b6),
+                # \u8fd4 ok=true + items=[],\u4e0d\u5e94\u4f7f US \u7aef fallback \u672c\u5730 (\u672c\u5730\u540c\u6837\u62a2\u4e0d\u5230) \u6216 \u5916\u5c42 catch\u3002
+                logger.info("iwara list page parsed empty, returning ok=true with empty items")
+                items = []
 
             return {
                 "ok": True,

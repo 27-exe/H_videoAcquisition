@@ -5,7 +5,34 @@ from FastTelethonhelper import fast_upload
 from datetime import datetime, timezone, timedelta
 from utils.pic_utils import get_video_info_async
 from telethon.tl.types import InputMediaUploadedDocument, DocumentAttributeVideo, DocumentAttributeFilename
+from pipelines.load import load_yaml
+
 logger = logging.getLogger(__name__)
+
+
+def _load_promotion() -> dict | None:
+    """\u8bfb config/telegram_send.local.yaml \u4e2d promotion \u5757\u3002
+
+    \u8fd4\u56de {"text":..., "url":..., "enabled": bool} \u6216 None (\u6587\u4ef6\u4e0d\u5b58\u5728 / \u89e3\u6790\u5931\u8d25).
+    \u8be5 yaml \u5728 .gitignore \u4e2d (\u5168\u673a\u672c\u5730\u4ee3\u4e0d\u5165 git),\u4e5f\u4e0d\u8fdb\u516c\u5171\u4ed3\u5e93.
+    """
+    try:
+        data = load_yaml("telegram_send.local.yaml")
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.debug(f"promotion local yaml not loaded: {e}")
+        return None
+    if not isinstance(data, dict):
+        return None
+    promo = data.get("promotion", {})
+    if not isinstance(promo, dict):
+        return None
+    return {
+        "text": (promo.get("text") or "").strip(),
+        "url": (promo.get("url") or "").strip(),
+        "enabled": bool(promo.get("enabled", False)),
+    }
 
 async def delete_messages(client, channel_id, message_ids):
     """删除指定频道中的消息"""
@@ -140,10 +167,13 @@ async def send_top5(client,ch_id,ranks,source,paths,ext = None):
                 Button.url('Top4', f'{ranks[3]}'),
                 Button.url('Top5', f'{ranks[4]}'),
             ],
-            #[
-            #    Button.url('额外内容', f'{ext}'),  可在此添加自定义宣传内容
-            #]
         ]
+        # \u53ef\u9009 promotion row\uff1a\u4ece config/telegram_send.local.yaml \u8bfb\uff0c
+        # enabled=true \u4e14 text/url \u90fd\u975e\u7a7a \u2192 \u8ffd\u52a0\u4e00\u4e2a button row\u3002
+        promo = _load_promotion()
+        if promo and promo["enabled"] and promo["text"] and promo["url"]:
+            buttons.append([Button.url(promo["text"], promo["url"])])
+            logger.info(f"send_top5 \u8ffd\u52a0 promotion row: text={promo['text']!r}")
         await client.send_file(ch_id,paths,caption=cap)
         await client.send_message(f'{ch_id}', message=cap_1, buttons=buttons)
         logger.info(f'成功发送{today},top5消息')

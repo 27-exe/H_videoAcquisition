@@ -73,7 +73,19 @@ def fetch_via_hk_crawler(src: str, body: dict[str, Any] | None = None) -> list[d
         "User-Agent": USER_AGENT,
     }
 
-    timeout = int(os.environ.get("CRAWLER_TIMEOUT_SEC", DEFAULT_TIMEOUT_SEC))
+    # \u8bfb env \u4e2d\u7684 timeout\uff1b\u4efb\u4f55\u9519\u8bef (\u4e0d\u662f\u6574\u6570\u3001\u8d85\u51fa\u8303\u56f4) \u5168\u90e8\u56de\u9ed8\u503c\u3002
+    # \u907f\u514d \u300cenv CRAWLER_TIMEOUT_SEC='abc'\u300d \u5bfc\u81f4 \u5e26\u6709 ValueError \u5f92\u5f15 \u5916\u5c42\uff0c\u8ba9 bot \u91cd\u8bd5 30 \u5206\u949f\u4e00\u6b21\u3002
+    timeout_str = os.environ.get("CRAWLER_TIMEOUT_SEC")
+    try:
+        timeout = int(timeout_str) if timeout_str else DEFAULT_TIMEOUT_SEC
+        if timeout <= 0 or timeout > 600:  # \u8b66\u707e\u4e0a\u9650\uff1a10 \u5206\u949f
+            logger.warning(f"CRAWLER_TIMEOUT_SEC={timeout} out of range, using default")
+            timeout = DEFAULT_TIMEOUT_SEC
+    except (TypeError, ValueError):
+        logger.warning(
+            f"CRAWLER_TIMEOUT_SEC={timeout_str!r} not a valid int, using default {DEFAULT_TIMEOUT_SEC}s"
+        )
+        timeout = DEFAULT_TIMEOUT_SEC
 
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=timeout)

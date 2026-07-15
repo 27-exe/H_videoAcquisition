@@ -110,13 +110,9 @@ async def crawl_hanime1(cfg: dict) -> dict:
                     break
 
             if not items:
-                return {
-                    "ok": False,
-                    "source": "hanime1",
-                    "error": "no_videos_found",
-                    "message": "list page parsed empty (CF block or layout drift)",
-                    "elapsed_ms": int((datetime.now() - started).total_seconds() * 1000),
-                }
+                # "no videos" \u662f\u5408\u6cd5\u7ed3\u679c, ok=true + items=[], \u4e0d\u8d70 fallback / catch
+                logger.info("hanime1 list page parsed empty, returning ok=true with empty items")
+                items = []
 
             return {
                 "ok": True,
