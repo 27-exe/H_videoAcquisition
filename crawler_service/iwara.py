@@ -294,7 +294,13 @@ async def crawl_iwara(cfg: dict) -> dict:
                 logger.warning(f"iwara api fail: vid={vid} result={type(content).__name__}")
                 download_url_list[idx] = ""
                 continue
-            parsed = _parse_api_json(content if isinstance(content, str) else "")
+            # fuck_cf(need_resp=True) returns the parsed JSON object directly
+            # (dict for a single video, list for an array response). Only fall
+            # back to the JSON-string parser when the content is a string.
+            if isinstance(content, (dict, list)):
+                parsed = [content] if isinstance(content, dict) else content
+            else:
+                parsed = _parse_api_json(str(content))
             if not parsed:
                 api_fail += 1
                 logger.warning(f"iwara api parse empty: vid={vid}")
