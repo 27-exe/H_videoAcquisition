@@ -27,8 +27,8 @@ from playwright_captcha.utils.camoufox_add_init_script.add_init_script import ge
 logger = logging.getLogger(__name__)
 
 ADDON_PATH = get_addon_path()
-shot_dir = Path("error_shot")
-shot_dir.mkdir(exist_ok=True)
+shot_dir = Path(os.environ.get("TMPDIR") or "/tmp") / "videoAcq_error_shot"
+shot_dir.mkdir(parents=True, exist_ok=True)
 
 # Mirrors the original MAX_CONCURRENT_BROWSERS — matches the single-VPS cap.
 MAX_CONCURRENT_BROWSERS = 2
