@@ -40,8 +40,11 @@ def _fallback_local_allowed() -> bool:
     return val not in ("0", "false", "False", "no")
 
 
-async def _fetch_iwara_via_hk(cfg) -> "CrawlResult | None":
+async def _fetch_iwara_via_hk(cfg, skip_ids: list[str] | None = None) -> "CrawlResult | None":
     """Phase 2 dual-VPS entry point: ask HK crawler for iwara items.
+
+    skip_ids: list of vid_ids already in db — HK will skip these to save
+    CDN requests.  None = no skip list (back-compat).
 
     Returns:
         CrawlResult on success, shape compatible with IwaraSpider.do_job().
@@ -55,6 +58,7 @@ async def _fetch_iwara_via_hk(cfg) -> "CrawlResult | None":
                 "keywords": cfg.get("keywords", "trending"),
                 "page": int(cfg.get("page", 1)),
                 "limit": int(cfg.get("limit", 30)),
+                **({"skip_ids": skip_ids} if skip_ids is not None else {}),
             },
         )
     except HKCrawlerError as e:
@@ -109,7 +113,14 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
             error: str | None = None
 
             if dual_mode:
-                spider = await _fetch_iwara_via_hk(cfg)
+                # Pass db skip_ids to HK so it can filter out already-sent
+                # videos before making API + deobfuscation calls.
+                try:
+                    skip_ids = list(await db.get_all_iwara_ids())
+                except Exception as e:
+                    logger.warning(f"get_all_iwara_ids failed: {e}; sending empty skip list")
+                    skip_ids = []
+                spider = await _fetch_iwara_via_hk(cfg, skip_ids=skip_ids)
                 if spider is None:
                     # HK crawler unreachable. Decide what to do next.
                     if _fallback_local_allowed():

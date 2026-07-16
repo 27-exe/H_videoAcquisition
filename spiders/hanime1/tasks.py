@@ -39,8 +39,10 @@ def _fallback_local_allowed() -> bool:
     return val not in ("0", "false", "False", "no")
 
 
-async def _fetch_hanime1_via_hk(cfg) -> "CrawlResult | None":
+async def _fetch_hanime1_via_hk(cfg, skip_ids: list[int] | None = None) -> "CrawlResult | None":
     """Phase 2 dual-VPS entry point: ask HK crawler for hanime1 items.
+
+    skip_ids: list of int video_ids already in db — HK will skip these.
 
     Returns CrawlResult whose .data is shaped like Hanime1spider.do_job(): a
     list of (title, source_url) tuples (NOT a [name_list, source_url_list]
@@ -54,6 +56,7 @@ async def _fetch_hanime1_via_hk(cfg) -> "CrawlResult | None":
                 "page": int(cfg.get("page", 1)),
                 "limit": int(cfg.get("limit", 30)),
                 "sort": cfg.get("sort", "today-popular"),
+                **({"skip_ids": skip_ids} if skip_ids is not None else {}),
             },
         )
     except HKCrawlerError as e:
@@ -103,7 +106,14 @@ async def do_hanime1(client, db: DataBase, max_retries: int = 3, retry_wait_minu
             error: str | None = None
 
             if dual_mode:
-                spider = await _fetch_hanime1_via_hk(cfg)
+                # Pass db skip_ids to HK so it can filter out already-sent
+                # videos before making download_url page requests.
+                try:
+                    skip_ids = list(await db.get_all_hanime1_ids())
+                except Exception as e:
+                    logger.warning(f"get_all_hanime1_ids failed: {e}; sending empty skip list")
+                    skip_ids = []
+                spider = await _fetch_hanime1_via_hk(cfg, skip_ids=skip_ids)
                 if spider is None:
                     if _fallback_local_allowed():
                         logger.info("falling back to local AsyncCamoufox for hanime1")

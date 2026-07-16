@@ -93,6 +93,19 @@ class DataBase:
         except Exception as e:
             logger.error(f"查询 Iwara 数据库失败: {e}")
             return 0
+
+    async def get_all_iwara_ids(self) -> set[str]:
+        """Return all iwara video_ids in db — used to skip re-crawling."""
+        await self.ensure_initialized()
+        try:
+            async with aiosqlite.connect(self.db_file) as conn:
+                async with conn.execute("SELECT video_url FROM iwara_info") as cursor:
+                    rows = await cursor.fetchall()
+                    return {r[0] for r in rows}
+        except Exception as e:
+            logger.error(f"查询 Iwara id 列表失败: {e}")
+            return set()
+
     # --- Hanime1 表操作 ---
 
     async def insert_hanime1_info(self, video_id: int, title: str,ch_id: int):
@@ -124,3 +137,15 @@ class DataBase:
         except Exception as e:
             logger.error(f"查询 Hanime1 数据库失败: {e}")
             return 0
+
+    async def get_all_hanime1_ids(self) -> set[int]:
+        """Return all hanime1 video_ids in db — used to skip re-crawling."""
+        await self.ensure_initialized()
+        try:
+            async with aiosqlite.connect(self.db_file) as conn:
+                async with conn.execute("SELECT video_id FROM hanime1_info") as cursor:
+                    rows = await cursor.fetchall()
+                    return {r[0] for r in rows}
+        except Exception as e:
+            logger.error(f"查询 Hanime1 id 列表失败: {e}")
+            return set()

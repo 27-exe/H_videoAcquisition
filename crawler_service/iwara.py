@@ -156,11 +156,12 @@ async def _resolve_one_download(
 async def crawl_iwara(cfg: dict) -> dict:
     """Return dict per plan §2.2.
 
-    cfg: at least {"keywords": "...", "page": int, "limit": int}
+    cfg: at least {"keywords": "...", "page": int, "limit": int, "skip_ids": list[str]}
     """
     keywords = cfg.get("keywords", "trending")
     page_num = int(cfg.get("page", 1))
     limit = int(cfg.get("limit", 30))
+    skip_ids: set[str] = set(cfg.get("skip_ids", []))
 
     list_url = f"{IWARA_BASE}/videos?sort={keywords}&page={page_num}"
     items: list[dict[str, Any]] = []
@@ -203,6 +204,8 @@ async def crawl_iwara(cfg: dict) -> dict:
                 if not m:
                     continue
                 vid_id = m.group(1)
+                if vid_id in skip_ids:
+                    continue  # US bot already has it in db
                 url = IWARA_BASE + href_list[0]
                 title_el = el.xpath('.//*[contains(@class, "videoTeaser__title")]')
                 title = title_el[0].text_content().strip()[:100] if title_el else ""
@@ -233,16 +236,20 @@ async def crawl_iwara(cfg: dict) -> dict:
             # 2a) fetch apiq.iwara.tv/video/{id} in-browser (CF bypass).
             # Each call opens its own page, but we launch 5-at-a-time concurrently
             # within one browser context — original spider's pattern.
+            # API fetch is also gated by a Semaphore(2) since iwara CDN may
+            # rate-limit otherwise.
+            _API_SEM = asyncio.Semaphore(2)
             async def _fetch_api(vid: str) -> dict | None:
-                api_url = f"{IWARA_API}/{vid}"
-                try:
-                    api_page, _ = await open_page(context, api_url, goto_timeout_ms=30000)
-                    content = await api_page.content()
-                    await api_page.close()
-                    parsed = _parse_api_json(content)
-                    return parsed[0] if parsed else None
-                except Exception:
-                    return None
+                async with _API_SEM:
+                    api_url = f"{IWARA_API}/{vid}"
+                    try:
+                        api_page, _ = await open_page(context, api_url, goto_timeout_ms=30000)
+                        content = await api_page.content()
+                        await api_page.close()
+                        parsed = _parse_api_json(content)
+                        return parsed[0] if parsed else None
+                    except Exception:
+                        return None
 
             for batch_start in range(0, len(vid_ids), _API_BATCH_SIZE):
                 batch_end = min(batch_start + _API_BATCH_SIZE, len(vid_ids))

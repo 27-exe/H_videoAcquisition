@@ -64,11 +64,12 @@ async def _fetch_one_download(context, video_id: str) -> str | int:
 async def crawl_hanime1(cfg: dict) -> dict:
     """Return dict per plan §2.2.
 
-    cfg: at least {"page": int, "limit": int, "sort": "..."}
+    cfg: at least {"page": int, "limit": int, "sort": "...", "skip_ids": list[int]}
     """
     page_num = int(cfg.get("page", 1))
     limit = int(cfg.get("limit", 30))
     sort_key = cfg.get("sort", "today-popular")
+    skip_ids: set[str] = set(str(s) for s in cfg.get("skip_ids", []))
 
     list_url = f"{HANIME1_BASE}/?page={page_num}&sort={sort_key}"
 
@@ -111,6 +112,8 @@ async def crawl_hanime1(cfg: dict) -> dict:
                 vid = m.group(1)
                 if vid in seen_vids:
                     continue
+                if vid in skip_ids:
+                    continue  # US bot already has it in db
 
                 # title from parent container
                 title = ""
