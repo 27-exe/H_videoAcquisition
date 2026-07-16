@@ -204,8 +204,6 @@ async def crawl_iwara(cfg: dict) -> dict:
                 if not m:
                     continue
                 vid_id = m.group(1)
-                if vid_id in skip_ids:
-                    continue  # US bot already has it in db
                 url = IWARA_BASE + href_list[0]
                 title_el = el.xpath('.//*[contains(@class, "videoTeaser__title")]')
                 title = title_el[0].text_content().strip()[:100] if title_el else ""
@@ -214,7 +212,7 @@ async def crawl_iwara(cfg: dict) -> dict:
                     "id": vid_id,
                     "title": title,
                     "source_url": url,
-                    # placeholder; resolved below
+                    # placeholder; resolved below (0 if vid_id in skip_ids)
                     "download_url": "",
                 })
                 if len(items) >= limit:
@@ -238,8 +236,12 @@ async def crawl_iwara(cfg: dict) -> dict:
             # within one browser context — original spider's pattern.
             # API fetch is also gated by a Semaphore(2) since iwara CDN may
             # rate-limit otherwise.
+            # skip_ids: vid_ids already in US db — skip API+deobf for them, leave
+            # download_url=0 so US bot reuses old ch_id.
             _API_SEM = asyncio.Semaphore(2)
             async def _fetch_api(vid: str) -> dict | None:
+                if vid in skip_ids:
+                    return None  # already in db, no need to call api
                 async with _API_SEM:
                     api_url = f"{IWARA_API}/{vid}"
                     try:

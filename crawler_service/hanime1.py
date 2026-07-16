@@ -112,8 +112,9 @@ async def crawl_hanime1(cfg: dict) -> dict:
                 vid = m.group(1)
                 if vid in seen_vids:
                     continue
-                if vid in skip_ids:
-                    continue  # US bot already has it in db
+                # NOTE: do NOT skip here — same trick as iwara: keep all 30 items
+                # so US bot can build full preview-top5, but only call the
+                # download page for vid_ids NOT in skip_ids.
 
                 # title from parent container
                 title = ""
@@ -164,6 +165,9 @@ async def crawl_hanime1(cfg: dict) -> dict:
                 batch_end = min(batch_start + _DL_BATCH_SIZE, len(items))
                 for i in range(batch_start, batch_end):
                     vid = items[i]["id"]
+                    if vid in skip_ids:
+                        items[i]["download_url"] = "0"  # already in US db, reuse ch_id
+                        continue
                     durl = await _fetch_one_download(context, vid)
                     items[i]["download_url"] = durl if isinstance(durl, str) else str(durl)
                 if batch_end < len(items):
