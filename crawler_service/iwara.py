@@ -264,15 +264,17 @@ async def crawl_iwara(cfg: dict) -> dict:
                     await asyncio.sleep(_API_BATCH_DELAY)
 
             # 2b) deobfuscate with aiohttp (pure HTTP, no browser) in parallel
-            # batched 5-at-a-time with aiohttp timeout to fail fast on bad items
+            # batched 5-at-a-time, but capped at 2 concurrent per session
+            # (same as old spider's asyncio.Semaphore(2) to avoid CDN rate-limiting)
             _DEOBF_TIMEOUT = 10  # seconds per fileUrl HTTP request
+            _SEM = asyncio.Semaphore(2)  # original concurrency cap
+            async def _deobf_one(api_file, idx):
+                async with _SEM:
+                    return await _resolve_one_download(http_session, api_file, timeout=_DEOBF_TIMEOUT)
             async with aiohttp.ClientSession() as http_session:
                 for batch_start in range(0, len(api_results), _API_BATCH_SIZE):
                     batch_end = min(batch_start + _API_BATCH_SIZE, len(api_results))
-                    tasks = [
-                        _resolve_one_download(http_session, api_file, timeout=_DEOBF_TIMEOUT)
-                        for api_file in api_results[batch_start:batch_end]
-                    ]
+                    tasks = [_deobf_one(api_file, i) for i, api_file in enumerate(api_results[batch_start:batch_end])]
                     results = await asyncio.gather(*tasks, return_exceptions=True)
                     for i, res in zip(range(batch_start, batch_end), results):
                         if isinstance(res, Exception):
