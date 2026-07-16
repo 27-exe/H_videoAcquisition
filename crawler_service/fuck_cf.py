@@ -54,7 +54,7 @@ def _build_proxy(proxy_str: Optional[str], pro_name: Optional[str], pro_word: Op
 
 
 async def fuck_cf(
-    urls: str | list[str],
+    urls: str | list[str | int],
     proxy_str: Optional[str] = None,
     pro_name=None,
     pro_word=None,

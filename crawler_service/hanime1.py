@@ -30,37 +30,6 @@ def _now_iso() -> str:
     return datetime.now(tz).date().isoformat()
 
 
-async def _fetch_one_download(context, video_id: str) -> str | int:
-    """Open hanime1 download page, return mp4 url or 0."""
-    url = f"{HANIME1_BASE}/download?v={video_id}"
-    try:
-        page, _ = await open_page(context, url, goto_timeout_ms=30000)
-    except Exception as e:
-        logger.debug(f"hanime1 download page failed v={video_id}: {e}")
-        return 0
-
-    try:
-        html = await page.content()
-    finally:
-        await page.close()
-
-    try:
-        tree = lxml_html.fromstring(html)
-        links = tree.xpath(
-            '//*[@id="content-div"]/div[1]/div[4]/div/div/table/tbody/tr[2]/td[5]/a/@data-url'
-        )
-    except Exception:
-        return 0
-
-    if not links:
-        logger.warning(f"hanime1 download link not found for v={video_id}")
-        return 0
-    durl = str(links[0])
-    if durl and not durl.startswith("http"):
-        durl = "https:" + durl
-    return durl
-
-
 async def crawl_hanime1(cfg: dict) -> dict:
     """Return dict per plan §2.2.
 
@@ -68,10 +37,17 @@ async def crawl_hanime1(cfg: dict) -> dict:
     """
     page_num = int(cfg.get("page", 1))
     limit = int(cfg.get("limit", 30))
-    sort_key = cfg.get("sort", "today-popular")
+    keywords = cfg.get("keywords", "全部")  # used as `genre` query param
     skip_ids: set[str] = set(str(s) for s in cfg.get("skip_ids", []))
 
-    list_url = f"{HANIME1_BASE}/?page={page_num}&sort={sort_key}"
+    # Original single-VPS URL: `search?genre=<kw>&sort=今日排行&page=<n>`
+    # The `sort` is hard-coded to "今日排行" because that is the only sort
+    # the home page uses; the US bot reads this page to get the daily ranking.
+    _TODAY_SORT = "%E6%9C%AC%E6%97%A5%E6%8E%92%E8%A1%8C"  # "今日排行"
+    list_url = (
+        f"{HANIME1_BASE}/search?genre={keywords}"
+        f"&sort={_TODAY_SORT}&page={page_num}"
+    )
 
     started = datetime.now()
     items: list[dict[str, Any]] = []
@@ -110,46 +86,38 @@ async def crawl_hanime1(cfg: dict) -> dict:
                     "elapsed_ms": int((datetime.now() - started).total_seconds() * 1000),
                 }
 
-            seen_vids: set[str] = set()
-            for a in anchors:
-                href = a.get("href", "")
+            # Original single-VPS xpath — pulls rank 30..1 in descending
+            # order, which is how Hanime1spider.preprocess_response does it.
+            # (Currently this only works on the home-rows-wrapper block, so
+            # the request must be against the search URL above.)
+            detail_msg: list[list[str]] = []
+            tree = lxml_html.fromstring(html)
+            for i in range(30, 0, -1):
+                xpath_tpl = (
+                    "//*[@id='home-rows-wrapper']/div[3]/div/div/div[{i}]/div/a/@href"
+                )
+                hrefs = tree.xpath(xpath_tpl.format(i=i))
+                titles = tree.xpath(
+                    "//*[@id='home-rows-wrapper']/div[3]/div/div/div[{i}]/@title"
+                    .format(i=i)
+                )
+                if hrefs and titles:
+                    detail_msg.append([titles[0], hrefs[0]])
+
+            # Map detail_msg (the original shape) into our items dict.
+            for rank, (title, href) in enumerate(detail_msg, start=1):
                 m = re.search(r"\?v=(\d+)", href)
                 if not m:
                     continue
                 vid = m.group(1)
-                if vid in seen_vids:
-                    continue
-                # NOTE: do NOT skip here — same trick as iwara: keep all 30 items
-                # so US bot can build full preview-top5, but only call the
-                # download page for vid_ids NOT in skip_ids.
-
-                # title from parent container
-                title = ""
-                parent = a.getparent()
-                while parent is not None:
-                    cls = parent.get("class", "")
-                    t_attr = parent.get("title", "")
-                    if t_attr:
-                        title = t_attr.strip()[:200]
-                        break
-                    parent = parent.getparent()
-
-                if not title:
-                    text = " ".join(a.text_content().split())
-                    text = re.sub(r"\b(thumb_up|thumb_down|%|次|views?)\b", "", text, flags=re.I)
-                    title = text.strip()[:200]
-
-                seen_vids.add(vid)
-
                 if href.startswith("/"):
                     url = HANIME1_BASE + href
                 elif not href.startswith("http"):
                     url = HANIME1_BASE + "/" + href.lstrip("/")
                 else:
                     url = href
-
                 items.append({
-                    "rank": len(items) + 1,
+                    "rank": rank,
                     "id": vid,
                     "title": title,
                     "source_url": url,
@@ -167,33 +135,94 @@ async def crawl_hanime1(cfg: dict) -> dict:
                     "elapsed_ms": int((datetime.now() - started).total_seconds() * 1000),
                 }
 
-            # ── 2) resolve download URLs (batched in-browser) ────────────
+            # ── 2) resolve download URLs via the ported fuck_cf() ───────────
+            # Mirrors Hanime1spider.parse: feed the list of
+            # /download?v=<id> URLs to fuck_cf in batches of 5 and pull
+            # @data-url out of the response body. skip_ids get a 0 in
+            # the result so the US bot reuses the existing ch_id from db.
+            from .fuck_cf import fuck_cf
+            from lxml import html as lxml_html_dl
+
             dl_ok_count = 0
             dl_skip_count = 0
             dl_fail_count = 0
-            logger.info(f"hanime1: starting download-url resolution for {len(items)} items, "
-                        f"skip_ids={len(skip_ids)}, batch={_DL_BATCH_SIZE}")
+            logger.info(
+                f"hanime1: starting download-url resolution for {len(items)} items, "
+                f"skip_ids={len(skip_ids)}, batch={_DL_BATCH_SIZE}"
+            )
+
             for batch_start in range(0, len(items), _DL_BATCH_SIZE):
-                batch_end = min(batch_start + _DL_BATCH_SIZE, len(items))
-                batch_ids = [items[i]["id"] for i in range(batch_start, batch_end)]
-                logger.info(f"hanime1 dl batch [{batch_start}-{batch_end-1}] ids={batch_ids}")
-                for i in range(batch_start, batch_end):
-                    vid = items[i]["id"]
-                    if vid in skip_ids:
-                        items[i]["download_url"] = "0"  # already in US db, reuse ch_id
-                        dl_skip_count += 1
-                        logger.info(f"  hanime1 dl skip: idx={i} vid={vid}")
-                        continue
-                    durl = await _fetch_one_download(context, vid)
-                    if isinstance(durl, str) and durl.startswith("https://"):
-                        items[i]["download_url"] = durl
-                        dl_ok_count += 1
-                        logger.info(f"  hanime1 dl ok: idx={i} vid={vid} url={durl[:60]}...")
+                batch = items[batch_start:batch_start + _DL_BATCH_SIZE]
+                batch_vids = [it["id"] for it in batch]
+                logger.info(f"hanime1 dl batch [{batch_start}-{batch_start + len(batch) - 1}] ids={batch_vids}")
+
+                # Build the URL list fuck_cf expects.  skip_ids entries
+                # become the literal 0 so fuck_cf keeps alignment.
+                cycle_urls: list[str | int] = []
+                for it in batch:
+                    if it["id"] in skip_ids:
+                        cycle_urls.append(0)
                     else:
-                        items[i]["download_url"] = "0"
+                        cycle_urls.append(
+                            f"https://hanime1.me/download?v={it['id']}"
+                        )
+
+                # fuck_cf opens its own AsyncCamoufox per call, so the outer
+                # list-page context can stay open.  Both browsers run
+                # concurrently without contention.
+                try:
+                    results = await fuck_cf(
+                        cycle_urls,
+                        proxy_str=None,
+                        pro_name=None,
+                        pro_word=None,
+                        storage_state=None,
+                        select=None,        # hanime1 has no CF interstitial
+                        max_retries=3,
+                    )
+                except Exception as e:
+                    logger.warning(f"  hanime1 dl batch exception: {e}")
+                    for it in batch:
+                        it["download_url"] = "0"
                         dl_fail_count += 1
-                        logger.warning(f"  hanime1 dl fail: idx={i} vid={vid} result={durl!r}")
-                if batch_end < len(items):
+                    continue
+
+                # Original parsing path: take page.content() and xpath it.
+                for it, url, content in zip(batch, cycle_urls, results):
+                    if url == 0:
+                        it["download_url"] = "0"
+                        dl_skip_count += 1
+                        logger.info(f"  hanime1 dl skip: idx={batch.index(it)} vid={it['id']}")
+                        continue
+                    if content == 0 or content == "" or isinstance(content, Exception):
+                        it["download_url"] = "0"
+                        dl_fail_count += 1
+                        logger.warning(f"  hanime1 dl fail (raw): vid={it['id']} content={type(content).__name__}")
+                        continue
+                    try:
+                        tree = lxml_html_dl.fromstring(content)
+                        d_url_list = tree.xpath(
+                            "//*[@id='content-div']/div[1]/div[4]/div/div/table"
+                            "/tbody/tr[2]/td[5]/a/@data-url"
+                        )
+                    except Exception as e:
+                        it["download_url"] = "0"
+                        dl_fail_count += 1
+                        logger.warning(f"  hanime1 dl parse fail: vid={it['id']} err={e}")
+                        continue
+                    if d_url_list:
+                        durl = d_url_list[0]
+                        if isinstance(durl, str) and not durl.startswith("http"):
+                            durl = "https:" + durl
+                        it["download_url"] = durl
+                        dl_ok_count += 1
+                        logger.info(f"  hanime1 dl ok: vid={it['id']} url={str(durl)[:60]}...")
+                    else:
+                        it["download_url"] = "0"
+                        dl_fail_count += 1
+                        logger.warning(f"  hanime1 dl no-link: vid={it['id']}")
+
+                if batch_start + _DL_BATCH_SIZE < len(items):
                     await asyncio.sleep(_DL_BATCH_DELAY)
             logger.info(f"hanime1 dl done: ok={dl_ok_count} skip={dl_skip_count} fail={dl_fail_count}")
 
