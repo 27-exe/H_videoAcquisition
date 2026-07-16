@@ -241,8 +241,12 @@ async def preprocess_iwara_list(
         try:
             logger.info(f"[预处理] 第 {attempt}/{max_retries} 次尝试访问首页...")
 
+            # Keep the original single-VPS calling convention: fuck_cf receives
+            # a list and therefore returns a list.  Passing bare `list_url` here
+            # returns one HTML string; zip([list_url], results) would then iterate
+            # its first character ('<') rather than the page content.
             results = await fuck_cf(
-                list_url,
+                [list_url],
                 proxy_str=proxy_str,
                 pro_name=pro_name,
                 pro_word=pro_word,
