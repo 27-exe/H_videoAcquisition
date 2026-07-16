@@ -24,14 +24,19 @@ from camoufox import AsyncCamoufox
 from playwright_captcha import CaptchaType, ClickSolver, FrameworkType
 from playwright_captcha.utils.camoufox_add_init_script.add_init_script import get_addon_path
 
+from .browser import MAX_CONCURRENT_BROWSERS
+
 logger = logging.getLogger(__name__)
 
 ADDON_PATH = get_addon_path()
 shot_dir = Path(os.environ.get("TMPDIR") or "/tmp") / "videoAcq_error_shot"
 shot_dir.mkdir(parents=True, exist_ok=True)
 
-# Mirrors the original MAX_CONCURRENT_BROWSERS — matches the single-VPS cap.
-MAX_CONCURRENT_BROWSERS = 2
+
+# Use the SAME semaphore as the FastAPI app's _BROWSER_SEMAPHORE so the
+# total in-flight browser count is correctly bounded.  Without this we
+# had two independent semaphores: app=3, fuck_cf=2, so up to 5
+# AsyncCamoufox instances could run concurrently.
 _BROWSER_SEMAPHORE: Optional[asyncio.Semaphore] = None
 
 
@@ -39,6 +44,10 @@ def _get_browser_semaphore() -> asyncio.Semaphore:
     global _BROWSER_SEMAPHORE
     if _BROWSER_SEMAPHORE is None:
         _BROWSER_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_BROWSERS)
+        logger.info(
+            f"fuck_cf: created module-level browser semaphore "
+            f"cap={MAX_CONCURRENT_BROWSERS}"
+        )
     return _BROWSER_SEMAPHORE
 
 
@@ -77,6 +86,11 @@ async def fuck_cf(
 
     url_list = [urls] if isinstance(urls, str) else urls
     results: list = []
+    logger.info(
+        f"fuck_cf: starting len={len(url_list)} proxy={'yes' if proxy else 'no'} "
+        f"storage_state={'yes' if storage_state else 'no'} "
+        f"max_retries={max_retries} need_resp={need_resp} select={'yes' if select else 'no'}"
+    )
 
     async with sem:
         async with AsyncCamoufox(

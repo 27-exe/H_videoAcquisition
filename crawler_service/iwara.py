@@ -122,7 +122,10 @@ async def _resolve_one_download(
             resp.raise_for_status()
             data = await resp.json()
     except Exception as e:
-        print(f"DL_DEOBF_REQ_FAIL: id={file_id} {type(e).__name__}: {e}", flush=True)
+        logger.warning(
+            f"_resolve_one_download: deobf HTTP failed id={file_id} "
+            f"url={file_url[:80]!r} err={type(e).__name__}: {e}"
+        )
         return 0
 
     if not isinstance(data, list):
