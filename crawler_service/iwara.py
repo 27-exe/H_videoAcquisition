@@ -310,7 +310,12 @@ async def crawl_iwara(cfg: dict) -> dict:
             deobf_fail_count = 0
 
             async def _deobf_one(api_file, idx):
-                return await _resolve_one_download(http_session, api_file, timeout=_DEOBF_TIMEOUT)
+                # Preserve the original single-VPS concurrency cap: at most
+                # two CDN deobfuscation requests in flight at once.
+                async with _SEM:
+                    return await _resolve_one_download(
+                        http_session, api_file, timeout=_DEOBF_TIMEOUT
+                    )
 
             async with aiohttp.ClientSession() as http_session:
                 deobf_to_run = [
