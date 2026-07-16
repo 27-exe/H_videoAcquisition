@@ -415,12 +415,27 @@ async def generate_thumbnail(t_video_path: str, thumb_path: str,cover_path, vid_
         # 5. 检查帧是否完整
         valid_frames = [f for f in frame_paths if os.path.exists(f)]
         if len(valid_frames) < count:
+            # This is the original "valid_frames < count" race: ffmpeg failed
+            # to extract enough frames.  Without this log we can't tell
+            # whether the bad thumb is from a broken source video or a
+            # transient ffmpeg issue.  See the known "preview write fails"
+            # issue discussed earlier.
+            logger.warning(
+                f"generate_thumbnail: only {len(valid_frames)}/{count} frames "
+                f"extracted for vid_id={vid_id} t_video_path={t_video_path!r}; "
+                f"expected {count} (is_vertical={is_vertical}, duration={duration}s)"
+            )
             return None
         # 6. 抽取单张封面
-        await generate_single_thumbnail_async(t_video_path,cover_id)
+        await generate_single_thumbnail_async(t_video_path, cover_id)
 
         if os.path.exists(cover_id):
             await generate_mini_thumb_async(cover_id, mini_thumb_id)
+        else:
+            logger.warning(
+                f"generate_thumbnail: cover_id missing after generate_single_thumbnail_async "
+                f"vid_id={vid_id} cover_id={cover_id!r}"
+            )
 
 
         # 7. 将图片合成任务丢入线程池，避免阻塞主事件循环

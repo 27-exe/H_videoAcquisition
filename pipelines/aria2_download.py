@@ -25,8 +25,21 @@ async def _single_download(aria, url: str, dst: str, video_name: str, max_retrie
 
     # 可选：文件已存在直接跳过（防止重复下载）
     if os.path.exists(dst):
-        logger.info(f"[{video_name}] 文件已存在，跳过下载 -> {dst}")
-        return dst
+        existing_bytes = os.path.getsize(dst)
+        if existing_bytes > 0:
+            logger.info(
+                f"[{video_name}] 文件已存在 ({existing_bytes} bytes)，跳过下载 -> {dst}"
+            )
+            return dst
+        # 0-byte stub left over from a failed attempt; let aria2 overwrite it
+        logger.warning(
+            f"[{video_name}] \u53d1\u73b0 0-byte \u5e7b\u4f4d\u6587\u4ef6\uff0c\u5220\u9664\u540e\u91cd\u8bd5 -> {dst}"
+        )
+        try:
+            os.remove(dst)
+        except OSError as e:
+            logger.error(f"[{video_name}] \u5220\u9664 0-byte \u6587\u4ef6\u5931\u8d25: {e}")
+            return 0
 
     options = {
         "dir": os.path.dirname(dst),
@@ -52,11 +65,26 @@ async def _single_download(aria, url: str, dst: str, video_name: str, max_retrie
                 status = await aria.tellStatus(gid)
                 st = status.get("status")
                 completed = int(status.get("completedLength", 0))
+                total = int(status.get("totalLength", 0))
 
                 if st == "complete":
+                    logger.info(
+                        f"[{video_name}] download complete: "
+                        f"{completed} bytes -> {dst}"
+                    )
                     return dst
 
                 if st in ("error", "removed"):
+                    # Surface the aria2 errorMessage/errorCode so retries
+                    # are explainable. Without this, repeated retries all
+                    # look identical and you have no idea what's failing.
+                    err_code = status.get("errorCode", "?")
+                    err_msg = status.get("errorMessage", "(no errorMessage)")
+                    logger.warning(
+                        f"[{video_name}] attempt {attempt}/{max_retries} failed: "
+                        f"status={st} code={err_code} msg={err_msg} "
+                        f"completed={completed} total={total}"
+                    )
                     break  # 触发外层 for 循环重试
 
                 # --- 新增：卡住检测逻辑 ---
@@ -69,7 +97,11 @@ async def _single_download(aria, url: str, dst: str, video_name: str, max_retrie
 
                 # 如果连续 5 次检查（约 25 秒）进度都没动，且还在 active 状态
                 if stuck_count >= 5:
-                    logger.warning(f"[{video_name}] 检测到下载卡住，强制重试...")
+                    speed = int(status.get("downloadSpeed", 0))
+                    logger.warning(
+                        f"[{video_name}] stalled: completed={completed}/{total} "
+                        f"speed={speed} B/s, no progress for 25s, forcing retry"
+                    )
                     await aria.forceRemove(gid)
                     break  # 跳出 while 循环，触发外层 attempt 重试
                 # -----------------------
@@ -100,7 +132,7 @@ async def _single_download(aria, url: str, dst: str, video_name: str, max_retrie
     return 0
 
 async def start_batch_download(urls: list[str], download_dir: str, names: list[str]):
-    cfg =load_json('aria2.json')
+    cfg = load_json('aria2.json')
     rpc_url = cfg['rpc_url']
     rpc_token = cfg['rpc_token']
 
@@ -112,5 +144,19 @@ async def start_batch_download(urls: list[str], download_dir: str, names: list[s
             full_dst = os.path.join(download_dir, f"{name}.mp4")
             tasks.append(_single_download(aria, url, full_dst, name))
 
+        # Real download is parallel via aria2's own concurrency; the
+        # gather() here just awaits the coroutines that poll aria2.
+        # We log before/after so the operator can see total batch time.
+        active = sum(1 for u in urls if u and u != 0)
+        skip = sum(1 for u in urls if u == 0)
+        logger.info(
+            f"start_batch_download: dir={download_dir} total={len(urls)} "
+            f"active={active} skip={skip} (0 = already in db)"
+        )
         results = await asyncio.gather(*tasks)
+        ok = sum(1 for r in results if r and r != 0)
+        failed = sum(1 for r in results if not r or r == 0)
+        logger.info(
+            f"start_batch_download: done ok={ok} failed={failed}"
+        )
         return results

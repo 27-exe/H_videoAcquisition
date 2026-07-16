@@ -89,9 +89,11 @@ class DataBase:
                         (video_url,)
                 ) as cursor:
                     result = await cursor.fetchone()
-                    return result if result is not None else 0
+                    hit = result if result is not None else 0
+                    logger.debug(f"get_iwara_info: video_url={video_url!r} hit={hit}")
+                    return hit
         except Exception as e:
-            logger.error(f"查询 Iwara 数据库失败: {e}")
+            logger.error(f"查询 Iwara 数据库失败: {e}", exc_info=True)
             return 0
 
     async def get_all_iwara_ids(self) -> set[str]:
@@ -133,9 +135,11 @@ class DataBase:
                         (video_id,)
                 ) as cursor:
                     result = await cursor.fetchone()
-                    return result if result is not None else 0
+                    hit = result if result is not None else 0
+                    logger.debug(f"get_hanime1_info: video_id={video_id} hit={hit}")
+                    return hit
         except Exception as e:
-            logger.error(f"查询 Hanime1 数据库失败: {e}")
+            logger.error(f"查询 Hanime1 数据库失败: {e}", exc_info=True)
             return 0
 
     async def get_all_hanime1_ids(self) -> set[int]:

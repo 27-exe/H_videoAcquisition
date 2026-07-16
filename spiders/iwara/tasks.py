@@ -115,6 +115,13 @@ async def _fetch_iwara_via_hk(
     download_urls = [it.get("download_url", 0) for it in items]
     id_list = [it.get("id") for it in items]
 
+    zero_count = sum(1 for d in download_urls if not d)
+    logger.info(
+        f"_fetch_iwara_via_hk: got {len(items)} items, "
+        f"{zero_count} download_url=0, "
+        f"skip_ids={len(skip_ids) if skip_ids else 0}"
+    )
+
     return CrawlResult(
         success=True,
         data=[name_list, source_url_list],
@@ -141,6 +148,12 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
     max_download_failures = 3
 
     dual_mode = _dual_mode_enabled()
+    fallback = _fallback_local_allowed()
+    logger.info(
+        f"do_iwara: starting max_retries={max_retries} dual_mode={dual_mode} "
+        f"FALLBACK_LOCAL_BROWSER={'1' if fallback else '0'} "
+        f"max_download_failures={max_download_failures}"
+    )
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -156,8 +169,23 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
                 try:
                     skip_ids = list(await db.get_all_iwara_ids())
                 except Exception as e:
-                    logger.warning(f"get_all_iwara_ids failed: {e}; sending empty skip list")
-                    skip_ids = []
+                    # If db lookup fails, we can't safely skip anything.  Fall
+                    # back to local browser (which calls if_exit internally)
+                    # rather than silently re-uploading every video.
+                    logger.error(
+                        f"get_all_iwara_ids failed: {e!r}; "
+                        f"forcing local fallback because we cannot determine skip set"
+                    )
+                    if _fallback_local_allowed():
+                        iwara = IwaraSpider(cfg, db)
+                        spider = await iwara.do_job()
+                    else:
+                        logger.error(
+                            "get_all_iwara_ids failed AND FALLBACK_LOCAL_BROWSER=0; "
+                            "skipping this attempt to avoid re-uploading existing videos"
+                        )
+                        error = "db_lookup_failed"
+                    continue  # to outer attempt retry
                 try:
                     spider = await _fetch_iwara_via_hk(cfg, skip_ids=skip_ids)
                 except HKCrawlExhausted:
@@ -317,6 +345,13 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
                 # 检查本轮是否成功发送了30条消息
                 successful_preview_count = len([msg_id for msg_id in preview_ch_ids if msg_id != 0])
                 expected_preview_count = 30 - len(download_failures)
+                video_ok_count = len([v for v in video_ch_ids if v and v != 0])
+                logger.info(
+                    f"do_iwara attempt {attempt}: "
+                    f"video uploaded={video_ok_count}/30, "
+                    f"preview sent={successful_preview_count}/{expected_preview_count}, "
+                    f"download_failures={len(download_failures)}"
+                )
 
                 if successful_preview_count < expected_preview_count:
                     logger.warning(f"第 {attempt} 次尝试只成功发送了 {successful_preview_count} 条预览图（目标：{expected_preview_count}条）")

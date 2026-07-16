@@ -98,6 +98,12 @@ async def _fetch_hanime1_via_hk(
         for it in items
     ]
     download_urls = [it.get("download_url", 0) for it in items]
+    zero_count = sum(1 for d in download_urls if not d)
+    logger.info(
+        f"_fetch_hanime1_via_hk: got {len(items)} items, "
+        f"{zero_count} download_url=0, "
+        f"skip_ids={len(skip_ids) if skip_ids else 0}"
+    )
     return CrawlResult(
         success=True,
         data=data_list,
@@ -124,6 +130,11 @@ async def do_hanime1(client, db: DataBase, max_retries: int = 3, retry_wait_minu
     vid_name = re.sub(r'^@', '', video_ch)
 
     dual_mode = _dual_mode_enabled()
+    fallback = _fallback_local_allowed()
+    logger.info(
+        f"do_hanime1: starting max_retries={max_retries} dual_mode={dual_mode} "
+        f"FALLBACK_LOCAL_BROWSER={'1' if fallback else '0'}"
+    )
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -139,8 +150,23 @@ async def do_hanime1(client, db: DataBase, max_retries: int = 3, retry_wait_minu
                 try:
                     skip_ids = list(await db.get_all_hanime1_ids())
                 except Exception as e:
-                    logger.warning(f"get_all_hanime1_ids failed: {e}; sending empty skip list")
-                    skip_ids = []
+                    # If db lookup fails, we can't safely skip anything.  Fall
+                    # back to local browser (which calls if_exit internally)
+                    # rather than silently re-uploading every video.
+                    logger.error(
+                        f"get_all_hanime1_ids failed: {e!r}; "
+                        f"forcing local fallback because we cannot determine skip set"
+                    )
+                    if _fallback_local_allowed():
+                        hm = Hanime1spider(cfg, db)
+                        spider = await hm.do_job()
+                    else:
+                        logger.error(
+                            "get_all_hanime1_ids failed AND FALLBACK_LOCAL_BROWSER=0; "
+                            "skipping this attempt to avoid re-uploading existing videos"
+                        )
+                        error = "db_lookup_failed"
+                    continue
                 try:
                     spider = await _fetch_hanime1_via_hk(cfg, skip_ids=skip_ids)
                 except HKCrawlExhausted:
@@ -265,14 +291,20 @@ async def do_hanime1(client, db: DataBase, max_retries: int = 3, retry_wait_minu
 
                 # 检查本轮是否成功发送了30条消息
                 successful_preview_count = len([msg_id for msg_id in preview_ch_ids if msg_id != 0])
+                video_ok_count = len([v for v in video_ch_ids if v and v != 0])
+                logger.info(
+                    f"do_hanime1 attempt {attempt}: "
+                    f"video uploaded={video_ok_count}/30, "
+                    f"preview sent={successful_preview_count}/30"
+                )
 
                 if successful_preview_count < 30:
                     logger.warning(f"第 {attempt} 次尝试只成功发送了 {successful_preview_count} 条预览图（目标：30条）")
-                    logger.info(f"注意：已发送的 {len([ch_id for ch_id in video_ch_ids if ch_id != 0])} 条视频消息和数据库记录将保留")
+                    logger.info(f"注意：已发送的 {video_ok_count} 条视频消息和数据库记录将保留")
 
                     # 只删除预览图频道的消息ID
                     if preview_ch_ids:
-                        logger.info(f"开始删除 {len([msg_id for msg_id in preview_ch_ids if msg_id != 0])} 条预览图消息...")
+                        logger.info(f"开始删除 {successful_preview_count} 条预览图消息...")
                         await delete_messages(client, pic_ch, [msg_id for msg_id in preview_ch_ids if msg_id != 0])
 
                     if attempt < max_retries:
