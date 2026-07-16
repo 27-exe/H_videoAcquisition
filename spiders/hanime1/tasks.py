@@ -7,7 +7,10 @@ from spiders.base_spider import CrawlResult
 from utils.pic_utils import generate_thumbnail,write_text_on_image
 from datetime import datetime, timezone, timedelta
 from pipelines.data_base import DataBase
-from utils.hk_crawler_client import fetch_via_hk_crawler, HKCrawlerError, HKUnreachable, HKCrawlFailure
+from utils.hk_crawler_client import (
+    fetch_via_hk_crawler, HKCrawlerError, HKUnreachable, HKCrawlFailure,
+    HKCrawlExhausted,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +89,9 @@ async def _fetch_hanime1_via_hk(
     else:
         logger.warning(
             f"hk crawler hanime1 failed after {hk_max_retries} attempts "
-            f"(last err: {last_err}); falling back to local browser"
+            f"(last err: {last_err}); escalating to one local fallback"
         )
-        return None
+        raise HKCrawlExhausted(str(last_err))
 
     data_list = [
         (it.get("title", ""), it.get("source_url", ""))
@@ -128,6 +131,7 @@ async def do_hanime1(client, db: DataBase, max_retries: int = 3, retry_wait_minu
 
             spider: CrawlResult | None = None
             error: str | None = None
+            hk_crawl_exhausted = False
 
             if dual_mode:
                 # Pass db skip_ids to HK so it can filter out already-sent
@@ -137,23 +141,34 @@ async def do_hanime1(client, db: DataBase, max_retries: int = 3, retry_wait_minu
                 except Exception as e:
                     logger.warning(f"get_all_hanime1_ids failed: {e}; sending empty skip list")
                     skip_ids = []
-                spider = await _fetch_hanime1_via_hk(cfg, skip_ids=skip_ids)
+                try:
+                    spider = await _fetch_hanime1_via_hk(cfg, skip_ids=skip_ids)
+                except HKCrawlExhausted:
+                    hk_crawl_exhausted = True
+                    spider = None
                 if spider is None:
                     if _fallback_local_allowed():
-                        logger.info("falling back to local AsyncCamoufox for hanime1")
+                        logger.info(
+                            "falling back to local AsyncCamoufox for hanime1"
+                            + " (one-shot after HK exhaustion)" if hk_crawl_exhausted else
+                            "falling back to local AsyncCamoufox for hanime1"
+                        )
                         hm = Hanime1spider(cfg, db)
                         spider = await hm.do_job()
                     else:
                         logger.error(
-                            "HK crawler unreachable and FALLBACK_LOCAL_BROWSER=0; "
+                            "HK crawler unavailable and FALLBACK_LOCAL_BROWSER=0; "
                             "skipping this attempt"
                         )
-                        error = "hk_unreachable_no_fallback"
+                        error = "hk_crawler_unavailable_no_fallback"
             else:
                 hm = Hanime1spider(cfg, db)
                 spider = await hm.do_job()
 
             if spider is None:
+                if hk_crawl_exhausted:
+                    logger.error("local one-shot fallback returned None after HK exhaustion; task failed")
+                    return False
                 if dual_mode and error is None:
                     error = "hk_crawler_returned_none"
                 if error is None:
@@ -170,6 +185,9 @@ async def do_hanime1(client, db: DataBase, max_retries: int = 3, retry_wait_minu
 
             if not spider.success:
                 logger.warning(f'第 {attempt} 次：未能正确爬取，原因: {spider.error}')
+                if hk_crawl_exhausted:
+                    logger.error("local one-shot fallback failed after HK exhaustion; task failed")
+                    return False
                 if attempt < max_retries:
                     wait_seconds = retry_wait_minutes * 60
                     logger.info(f"将在 {retry_wait_minutes} 分钟后进行第 {attempt + 1} 次重试...")

@@ -7,7 +7,10 @@ from spiders.base_spider import CrawlResult
 from utils.pic_utils import generate_thumbnail,write_text_on_image
 from datetime import datetime, timezone, timedelta
 from pipelines.data_base import DataBase
-from utils.hk_crawler_client import fetch_via_hk_crawler, HKCrawlerError, HKUnreachable, HKCrawlFailure
+from utils.hk_crawler_client import (
+    fetch_via_hk_crawler, HKCrawlerError, HKUnreachable, HKCrawlFailure,
+    HKCrawlExhausted,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,12 +98,12 @@ async def _fetch_iwara_via_hk(
                 )
                 await asyncio.sleep(hk_retry_delay)
     else:
-        # exhausted hk_max_retries; HK reachable but kept failing
+        # exhausted hk_max_retries; caller must run local browser once only.
         logger.warning(
             f"hk crawler iwara failed after {hk_max_retries} attempts "
-            f"(last err: {last_err}); falling back to local browser"
+            f"(last err: {last_err}); escalating to one local fallback"
         )
-        return None
+        raise HKCrawlExhausted(str(last_err))
 
     # Map HK JSON items to legacy CrawlResult shape:
     #   data   = [name_list, source_url_list]
@@ -145,6 +148,7 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
 
             spider: CrawlResult | None = None
             error: str | None = None
+            hk_crawl_exhausted = False
 
             if dual_mode:
                 # Pass db skip_ids to HK so it can filter out already-sent
@@ -154,19 +158,30 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
                 except Exception as e:
                     logger.warning(f"get_all_iwara_ids failed: {e}; sending empty skip list")
                     skip_ids = []
-                spider = await _fetch_iwara_via_hk(cfg, skip_ids=skip_ids)
+                try:
+                    spider = await _fetch_iwara_via_hk(cfg, skip_ids=skip_ids)
+                except HKCrawlExhausted:
+                    # HK was reachable but failed its 3 remote attempts.  The
+                    # local fallback below is explicitly one-shot: if it also
+                    # fails, do_iwara returns False rather than re-entering the
+                    # outer 10-minute legacy retry loop.
+                    hk_crawl_exhausted = True
+                    spider = None
                 if spider is None:
-                    # HK crawler unreachable. Decide what to do next.
                     if _fallback_local_allowed():
-                        logger.info("falling back to local AsyncCamoufox for iwara")
+                        logger.info(
+                            "falling back to local AsyncCamoufox for iwara"
+                            + " (one-shot after HK exhaustion)" if hk_crawl_exhausted else
+                            "falling back to local AsyncCamoufox for iwara"
+                        )
                         iwara = IwaraSpider(cfg, db)
                         spider = await iwara.do_job()
                     else:
                         logger.error(
-                            "HK crawler unreachable and FALLBACK_LOCAL_BROWSER=0; "
+                            "HK crawler unavailable and FALLBACK_LOCAL_BROWSER=0; "
                             "skipping this attempt"
                         )
-                        error = "hk_unreachable_no_fallback"
+                        error = "hk_crawler_unavailable_no_fallback"
                 # else: HK succeeded, spider is set; do not call local.
             else:
                 # legacy single-VPS path (no HK env vars).
@@ -174,6 +189,9 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
                 spider = await iwara.do_job()
 
             if spider is None:
+                if hk_crawl_exhausted:
+                    logger.error("local one-shot fallback returned None after HK exhaustion; task failed")
+                    return False
                 if dual_mode and error is None:
                     error = "hk_crawler_returned_none"
                 if error is None:
@@ -190,6 +208,9 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
 
             if not spider.success:
                 logger.warning(f'第 {attempt} 次：未能正确爬取，原因: {spider.error}')
+                if hk_crawl_exhausted:
+                    logger.error("local one-shot fallback failed after HK exhaustion; task failed")
+                    return False
                 if attempt < max_retries:
                     wait_seconds = retry_wait_minutes * 60
                     logger.info(f"将在 {retry_wait_minutes} 分钟后进行第 {attempt + 1} 次重试...")

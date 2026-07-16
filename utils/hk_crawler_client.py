@@ -54,6 +54,15 @@ class HKCrawlFailure(HKCrawlerError):
     pass
 
 
+class HKCrawlExhausted(HKCrawlerError):
+    """HK was reachable but failed all remote crawl attempts.
+
+    Caller must fall back to the local crawler only once, rather than let the
+    outer legacy retry loop cycle back into HK and then local again.
+    """
+    pass
+
+
 def _required_env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
@@ -108,10 +117,17 @@ def fetch_via_hk_crawler(src: str, body: dict[str, Any] | None = None) -> list[d
 
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
-    except requests.Timeout as e:
-        raise HKUnreachable(f"timeout after {timeout}s: {e}")
+    except requests.ConnectTimeout as e:
+        raise HKUnreachable(f"connect timeout after {timeout}s: {e}")
+    except requests.ReadTimeout as e:
+        # TCP connection was established, but HK did not finish the crawl in
+        # time. This is a remote crawl failure, so it belongs in the 3-attempt
+        # HK retry path rather than immediate local fallback.
+        raise HKCrawlFailure(f"read timeout after {timeout}s: {e}")
     except requests.ConnectionError as e:
         raise HKUnreachable(f"connection error: {e}")
+    except requests.Timeout as e:
+        raise HKUnreachable(f"timeout after {timeout}s: {e}")
     except requests.RequestException as e:
         raise HKUnreachable(f"request error: {e}")
 
