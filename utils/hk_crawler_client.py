@@ -31,7 +31,26 @@ USER_AGENT = "videoAcq-bot/0.1 (dual-vps; contact: operator-local)"
 
 
 class HKCrawlerError(Exception):
-    """Raised when HK crawler endpoint is unreachable or returns failure."""
+    """Base class for HK crawler errors.  Two subclasses differentiate
+    between unreachable (network-level: must NOT retry, fall back to local
+    browser immediately) and crawl failure (HK reachable but returned a bad
+    payload: retry up to 3 times, then fall back).
+    """
+    pass
+
+
+class HKUnreachable(HKCrawlerError):
+    """Network-level error: HK cannot be reached at all (connection refused,
+    DNS failure, ssh-tunnel down, timeout, etc.).  Caller should fall back
+    to local browser immediately without retry.
+    """
+    pass
+
+
+class HKCrawlFailure(HKCrawlerError):
+    """HK is reachable but returned a bad payload: HTTP 200 with ok=false,
+    non-JSON body, items field malformed, etc.  Caller may retry.
+    """
     pass
 
 
@@ -90,30 +109,35 @@ def fetch_via_hk_crawler(src: str, body: dict[str, Any] | None = None) -> list[d
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
     except requests.Timeout as e:
-        raise HKCrawlerError(f"timeout after {timeout}s: {e}")
+        raise HKUnreachable(f"timeout after {timeout}s: {e}")
     except requests.ConnectionError as e:
-        raise HKCrawlerError(f"connection error: {e}")
+        raise HKUnreachable(f"connection error: {e}")
     except requests.RequestException as e:
-        raise HKCrawlerError(f"request error: {e}")
+        raise HKUnreachable(f"request error: {e}")
 
     if resp.status_code != 200:
-        raise HKCrawlerError(
+        # HK reachable but returned non-200: classify as crawl failure
+        # (could be 5xx HK internal, 503 HK overloaded, etc.) — caller may retry.
+        raise HKCrawlFailure(
             f"http {resp.status_code} from HK: {resp.text[:200]}"
         )
 
     try:
         data = resp.json()
     except ValueError as e:
-        raise HKCrawlerError(f"non-JSON response: {e}")
+        # HK reachable, 200, but body isn't JSON — caller's parse path; retryable.
+        raise HKCrawlFailure(f"non-JSON response: {e}")
 
     if not isinstance(data, dict) or not data.get("ok"):
         err = data.get("error") if isinstance(data, dict) else None
         msg = data.get("message") if isinstance(data, dict) else None
-        raise HKCrawlerError(f"hk crawler ok=false (err={err}, msg={msg})")
+        # ok=false includes the "list_page_failed" / "parse_failed" / "internal_error"
+        # cases — HK is reachable, browser failed inside.  Retry.
+        raise HKCrawlFailure(f"hk crawler ok=false (err={err}, msg={msg})")
 
     items = data.get("items")
     if not isinstance(items, list):
-        raise HKCrawlerError(f"items not a list: {type(items)}")
+        raise HKCrawlFailure(f"items not a list: {type(items)}")
 
     logger.info(f"hk crawler {src}: got {len(items)} items in {data.get('elapsed_ms')}ms")
     return items

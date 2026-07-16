@@ -7,7 +7,7 @@ from spiders.base_spider import CrawlResult
 from utils.pic_utils import generate_thumbnail,write_text_on_image
 from datetime import datetime, timezone, timedelta
 from pipelines.data_base import DataBase
-from utils.hk_crawler_client import fetch_via_hk_crawler, HKCrawlerError
+from utils.hk_crawler_client import fetch_via_hk_crawler, HKCrawlerError, HKUnreachable, HKCrawlFailure
 
 logger = logging.getLogger(__name__)
 
@@ -40,31 +40,65 @@ def _fallback_local_allowed() -> bool:
     return val not in ("0", "false", "False", "no")
 
 
-async def _fetch_iwara_via_hk(cfg, skip_ids: list[str] | None = None) -> "CrawlResult | None":
+async def _fetch_iwara_via_hk(
+    cfg, skip_ids: list[str] | None = None,
+    hk_max_retries: int = 3, hk_retry_delay: float = 5.0,
+) -> "CrawlResult | None":
     """Phase 2 dual-VPS entry point: ask HK crawler for iwara items.
 
     skip_ids: list of vid_ids already in db — HK will skip these to save
     CDN requests.  None = no skip list (back-compat).
 
+    Fallback semantics:
+      - HKUnreachable  → return None immediately (caller falls back to local
+                         AsyncCamoufox directly; matches old single-VPS retry
+                         policy which never retried unreachable tunnels).
+      - HKCrawlFailure → retry up to hk_max_retries times (HK reachable, payload
+                         bad — could be iwara 5xx, parse failure, etc.).
+                         After hk_max_retries failures, return None so caller
+                         falls back to local browser (single attempt).
+
     Returns:
         CrawlResult on success, shape compatible with IwaraSpider.do_job().
-        None if HK crawler is unreachable and caller should fall back to local
-        AsyncCamoufox path.
+        None if HK unreachable or HK crawl failed hk_max_retries times —
+        caller should fall back to local IwaraSpider.do_job() once.
     """
-    try:
-        items = fetch_via_hk_crawler(
-            "iwara",
-            {
-                "keywords": cfg.get("keywords", "trending"),
-                "page": int(cfg.get("page", 1)),
-                "limit": int(cfg.get("limit", 30)),
-                **({"skip_ids": skip_ids} if skip_ids is not None else {}),
-            },
-        )
-    except HKCrawlerError as e:
+    import asyncio
+    last_err = None
+    for attempt in range(1, hk_max_retries + 1):
+        try:
+            items = fetch_via_hk_crawler(
+                "iwara",
+                {
+                    "keywords": cfg.get("keywords", "trending"),
+                    "page": int(cfg.get("page", 1)),
+                    "limit": int(cfg.get("limit", 30)),
+                    **({"skip_ids": skip_ids} if skip_ids is not None else {}),
+                },
+            )
+            break  # success
+        except HKUnreachable as e:
+            # Network-level failure: no point retrying — fall back immediately.
+            logger.warning(
+                f"hk crawler iwara unreachable (attempt {attempt}/{hk_max_retries}): {e}; "
+                f"falling back to local browser immediately"
+            )
+            return None
+        except HKCrawlFailure as e:
+            last_err = e
+            logger.warning(
+                f"hk crawler iwara crawl failure (attempt {attempt}/{hk_max_retries}): {e}"
+            )
+            if attempt < hk_max_retries:
+                logger.info(
+                    f"retrying HK iwara after {hk_retry_delay}s..."
+                )
+                await asyncio.sleep(hk_retry_delay)
+    else:
+        # exhausted hk_max_retries; HK reachable but kept failing
         logger.warning(
-            f"hk crawler iwara unavailable: {e}; "
-            f"fallback_local_browser={_fallback_local_allowed()}"
+            f"hk crawler iwara failed after {hk_max_retries} attempts "
+            f"(last err: {last_err}); falling back to local browser"
         )
         return None
 

@@ -7,7 +7,7 @@ from spiders.base_spider import CrawlResult
 from utils.pic_utils import generate_thumbnail,write_text_on_image
 from datetime import datetime, timezone, timedelta
 from pipelines.data_base import DataBase
-from utils.hk_crawler_client import fetch_via_hk_crawler, HKCrawlerError
+from utils.hk_crawler_client import fetch_via_hk_crawler, HKCrawlerError, HKUnreachable, HKCrawlFailure
 
 logger = logging.getLogger(__name__)
 
@@ -39,30 +39,54 @@ def _fallback_local_allowed() -> bool:
     return val not in ("0", "false", "False", "no")
 
 
-async def _fetch_hanime1_via_hk(cfg, skip_ids: list[int] | None = None) -> "CrawlResult | None":
+async def _fetch_hanime1_via_hk(
+    cfg, skip_ids: list[int] | None = None,
+    hk_max_retries: int = 3, hk_retry_delay: float = 5.0,
+) -> "CrawlResult | None":
     """Phase 2 dual-VPS entry point: ask HK crawler for hanime1 items.
 
     skip_ids: list of int video_ids already in db — HK will skip these.
+
+    Fallback semantics mirror _fetch_iwara_via_hk:
+      - HKUnreachable  → return None immediately, caller falls back to local
+      - HKCrawlFailure → retry up to hk_max_retries times, then fall back
 
     Returns CrawlResult whose .data is shaped like Hanime1spider.do_job(): a
     list of (title, source_url) tuples (NOT a [name_list, source_url_list]
     like iwara). .detail = download_urls, .extra = id list (parsed by
     do_hanime1 via re.search on the source_url).
     """
-    try:
-        items = fetch_via_hk_crawler(
-            "hanime1",
-            {
-                "page": int(cfg.get("page", 1)),
-                "limit": int(cfg.get("limit", 30)),
-                "sort": cfg.get("sort", "today-popular"),
-                **({"skip_ids": skip_ids} if skip_ids is not None else {}),
-            },
-        )
-    except HKCrawlerError as e:
+    last_err = None
+    for attempt in range(1, hk_max_retries + 1):
+        try:
+            items = fetch_via_hk_crawler(
+                "hanime1",
+                {
+                    "page": int(cfg.get("page", 1)),
+                    "limit": int(cfg.get("limit", 30)),
+                    "sort": cfg.get("sort", "today-popular"),
+                    **({"skip_ids": skip_ids} if skip_ids is not None else {}),
+                },
+            )
+            break  # success
+        except HKUnreachable as e:
+            logger.warning(
+                f"hk crawler hanime1 unreachable (attempt {attempt}/{hk_max_retries}): {e}; "
+                f"falling back to local browser immediately"
+            )
+            return None
+        except HKCrawlFailure as e:
+            last_err = e
+            logger.warning(
+                f"hk crawler hanime1 crawl failure (attempt {attempt}/{hk_max_retries}): {e}"
+            )
+            if attempt < hk_max_retries:
+                logger.info(f"retrying HK hanime1 after {hk_retry_delay}s...")
+                await asyncio.sleep(hk_retry_delay)
+    else:
         logger.warning(
-            f"hk crawler hanime1 unavailable: {e}; "
-            f"fallback_local_browser={_fallback_local_allowed()}"
+            f"hk crawler hanime1 failed after {hk_max_retries} attempts "
+            f"(last err: {last_err}); falling back to local browser"
         )
         return None
 
