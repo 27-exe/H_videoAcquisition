@@ -167,12 +167,16 @@ async def crawl_iwara(cfg: dict) -> dict:
     items: list[dict[str, Any]] = []
 
     started = datetime.now()
+    logger.info(f"iwara start: url={list_url} limit={limit} skip_ids={len(skip_ids)}")
     try:
         async with open_browser() as context:
+            logger.info("iwara: browser context opened")
             # ── 1) list page ─────────────────────────────────────────────
             try:
                 list_page, _ = await open_page(context, list_url, goto_timeout_ms=60000)
+                logger.info(f"iwara: list page loaded: {list_url}")
             except Exception as e:
+                logger.warning(f"iwara: list_page_failed: {e}")
                 return {
                     "ok": False, "source": "iwara", "error": "list_page_failed",
                     "message": str(e),
@@ -181,6 +185,7 @@ async def crawl_iwara(cfg: dict) -> dict:
 
             try:
                 html = await list_page.content()
+                logger.info(f"iwara: list html extracted: {len(html)} bytes")
             finally:
                 await list_page.close()
 
@@ -189,7 +194,9 @@ async def crawl_iwara(cfg: dict) -> dict:
                 items_el = doc.xpath(
                     '//*[contains(concat(" ", normalize-space(@class), " "), " page-videoList__item ")]'
                 )
+                logger.info(f"iwara: xpath matched {len(items_el)} video cards on page")
             except Exception as e:
+                logger.warning(f"iwara: xpath parse_failed: {e}")
                 return {
                     "ok": False, "source": "iwara", "error": "parse_failed",
                     "message": f"xpath parse: {e}",
@@ -218,6 +225,8 @@ async def crawl_iwara(cfg: dict) -> dict:
                 if len(items) >= limit:
                     break
 
+            logger.info(f"iwara: list_page parsed {len(items)}/{limit} items")
+
             if not items:
                 logger.info("iwara list page parsed empty, returning ok=true with empty items")
                 return {
@@ -239,8 +248,14 @@ async def crawl_iwara(cfg: dict) -> dict:
             # skip_ids: vid_ids already in US db — skip API+deobf for them, leave
             # download_url=0 so US bot reuses old ch_id.
             _API_SEM = asyncio.Semaphore(2)
+            api_skip_count = 0
+            api_ok_count = 0
+            api_fail_count = 0
+
             async def _fetch_api(vid: str) -> dict | None:
+                nonlocal api_skip_count, api_ok_count, api_fail_count
                 if vid in skip_ids:
+                    api_skip_count += 1
                     return None  # already in db, no need to call api
                 async with _API_SEM:
                     api_url = f"{IWARA_API}/{vid}"
@@ -249,20 +264,30 @@ async def crawl_iwara(cfg: dict) -> dict:
                         content = await api_page.content()
                         await api_page.close()
                         parsed = _parse_api_json(content)
-                        return parsed[0] if parsed else None
-                    except Exception:
+                        if parsed:
+                            api_ok_count += 1
+                            return parsed[0]
+                        api_fail_count += 1
+                        logger.warning(f"iwara api fetch: empty result vid={vid}")
+                        return None
+                    except Exception as e:
+                        api_fail_count += 1
+                        logger.warning(f"iwara api fetch exception vid={vid} {type(e).__name__}: {e}")
                         return None
 
+            logger.info(f"iwara: starting API fetch for {len(vid_ids)} vids, "
+                        f"skip={len(skip_ids)}, batch={_API_BATCH_SIZE}")
             for batch_start in range(0, len(vid_ids), _API_BATCH_SIZE):
                 batch_end = min(batch_start + _API_BATCH_SIZE, len(vid_ids))
                 batch_ids = vid_ids[batch_start:batch_end]
+                logger.info(f"iwara api batch [{batch_start}-{batch_end-1}] ids={batch_ids}")
                 results = await asyncio.gather(
                     *[_fetch_api(vid) for vid in batch_ids],
                     return_exceptions=True,
                 )
                 for i, res in zip(range(batch_start, batch_end), results):
                     if isinstance(res, Exception):
-                        print(f"DL_FETCH_API_EXC: vid_idx={i} {type(res).__name__}: {res}", flush=True)
+                        logger.warning(f"DL_FETCH_API_EXC: vid_idx={i} {type(res).__name__}: {res}")
                         api_results[i] = None
                     elif isinstance(res, dict):
                         api_results[i] = res
@@ -272,31 +297,57 @@ async def crawl_iwara(cfg: dict) -> dict:
                 if batch_end < len(vid_ids):
                     await asyncio.sleep(_API_BATCH_DELAY)
 
+            logger.info(f"iwara api fetch done: skip={api_skip_count} ok={api_ok_count} "
+                        f"fail={api_fail_count} total={len(vid_ids)}")
+
             # 2b) deobfuscate with aiohttp (pure HTTP, no browser) in parallel
             # batched 5-at-a-time, but capped at 2 concurrent per session
             # (same as old spider's asyncio.Semaphore(2) to avoid CDN rate-limiting)
             _DEOBF_TIMEOUT = 10  # seconds per fileUrl HTTP request
             _SEM = asyncio.Semaphore(2)  # original concurrency cap
+            deobf_skip_count = 0
+            deobf_ok_count = 0
+            deobf_fail_count = 0
+
             async def _deobf_one(api_file, idx):
-                async with _SEM:
-                    return await _resolve_one_download(http_session, api_file, timeout=_DEOBF_TIMEOUT)
+                return await _resolve_one_download(http_session, api_file, timeout=_DEOBF_TIMEOUT)
+
             async with aiohttp.ClientSession() as http_session:
-                for batch_start in range(0, len(api_results), _API_BATCH_SIZE):
-                    batch_end = min(batch_start + _API_BATCH_SIZE, len(api_results))
-                    tasks = [_deobf_one(api_file, i) for i, api_file in enumerate(api_results[batch_start:batch_end])]
+                deobf_to_run = [
+                    (i, api_results[i]) for i in range(len(api_results))
+                    if api_results[i] is not None
+                ]
+                logger.info(f"iwara: deobf to run {len(deobf_to_run)} items "
+                            f"(skipped {len(api_results) - len(deobf_to_run)} with no api result)")
+
+                for batch_start in range(0, len(deobf_to_run), _API_BATCH_SIZE):
+                    batch = deobf_to_run[batch_start:batch_start + _API_BATCH_SIZE]
+                    tasks = [_deobf_one(api_file, idx) for idx, api_file in batch]
                     results = await asyncio.gather(*tasks, return_exceptions=True)
-                    for i, res in zip(range(batch_start, batch_end), results):
+                    for (i, _), res in zip(batch, results):
                         if isinstance(res, Exception):
-                            print(f"DL_DEOBF_EXC: vid_idx={i} {type(res).__name__}: {res}", flush=True)
+                            deobf_fail_count += 1
+                            logger.warning(f"DL_DEOBF_EXC: vid_idx={i} {type(res).__name__}: {res}")
                             items[i]["download_url"] = ""
+                        elif isinstance(res, str) and res:
+                            deobf_ok_count += 1
+                            items[i]["download_url"] = res
+                            logger.info(f"iwara deobf ok: vid_idx={i} url={res[:60]}...")
                         else:
-                            items[i]["download_url"] = res if isinstance(res, str) else ""
-                    if batch_end < len(api_results):
+                            deobf_fail_count += 1
+                            items[i]["download_url"] = ""
+                            logger.warning(f"iwara deobf fail: vid_idx={i} result={res!r}")
+                    if batch_start + _API_BATCH_SIZE < len(deobf_to_run):
                         await asyncio.sleep(_API_BATCH_DELAY)
 
-            # filter: items without a download_url become 0 (US bot will skip)
-            for it in items:
+                logger.info(f"iwara deobf done: ok={deobf_ok_count} fail={deobf_fail_count}")
+
+            # summary of which items ended up with download_url=0
+            zero_count = sum(1 for it in items if not it.get("download_url"))
+            logger.info(f"iwara: items without download_url: {zero_count}/{len(items)}")
+            for i, it in enumerate(items):
                 if not it.get("download_url"):
+                    logger.info(f"  zero-idx={i} id={it['id']} title={it.get('title','')[:40]}")
                     it["download_url"] = 0
 
             return {

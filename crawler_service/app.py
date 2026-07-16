@@ -43,6 +43,15 @@ app = FastAPI(
 )
 
 
+# Ensure INFO+ logs are emitted to stdout for journalctl visibility.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s | %(message)s",
+    force=True,
+)
+logging.getLogger("crawler_service").setLevel(logging.INFO)
+
+
 # ─── Public, unauthenticated ──────────────────────────────────────────────
 @app.get("/healthcheck")
 async def healthcheck() -> dict[str, Any]:
