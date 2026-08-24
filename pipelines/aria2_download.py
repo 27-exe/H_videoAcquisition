@@ -1,4 +1,4 @@
-import logging,os,asyncio
+import logging,os,asyncio,time
 from contextlib import asynccontextmanager
 from aioaria2 import Aria2HttpClient
 
@@ -60,6 +60,7 @@ async def _single_download(aria, url: str, dst: str, video_name: str, max_retrie
             logger.info(f"[{video_name}] 第 {attempt}/{max_retries} 次尝试启动，GID: {gid}")
             last_completed = 0
             stuck_count = 0  # 计数器：记录进度不动的次数
+            start_time = time.monotonic()  # 下载开始时间，用于超时检测
 
             while True:
                 status = await aria.tellStatus(gid)
@@ -87,23 +88,40 @@ async def _single_download(aria, url: str, dst: str, video_name: str, max_retrie
                     )
                     break  # 触发外层 for 循环重试
 
-                # --- 新增：卡住检测逻辑 ---
-                if completed > 0 and completed == last_completed:
+                # --- 卡住检测逻辑 ---
+                # 检测条件：进度无变化（包括 total=0 时 completed 永远为 0 的情况）
+                if completed == last_completed:
                     stuck_count += 1
                 else:
                     stuck_count = 0  # 进度有变化，重置计数器
 
                 last_completed = completed
 
-                # 如果连续 5 次检查（约 25 秒）进度都没动，且还在 active 状态
+                # 条件 1：连续 5 次检查（约 25 秒）进度都没动
                 if stuck_count >= 5:
                     speed = int(status.get("downloadSpeed", 0))
                     logger.warning(
                         f"[{video_name}] stalled: completed={completed}/{total} "
                         f"speed={speed} B/s, no progress for 25s, forcing retry"
                     )
-                    await aria.forceRemove(gid)
+                    try:
+                        await aria.forceRemove(gid)
+                    except Exception as fe:
+                        logger.warning(f"[{video_name}] forceRemove failed (ignored): {fe}")
                     break  # 跳出 while 循环，触发外层 attempt 重试
+
+                # 条件 2：单文件总耗时超过 10 分钟，强制终止
+                elapsed = time.monotonic() - start_time
+                if elapsed > 600:
+                    logger.warning(
+                        f"[{video_name}] download timeout: {elapsed:.0f}s elapsed, " 
+                        f"completed={completed}/{total}, forcing retry"
+                    )
+                    try:
+                        await aria.forceRemove(gid)
+                    except Exception as fe:
+                        logger.warning(f"[{video_name}] forceRemove failed (ignored): {fe}")
+                    break
                 # -----------------------
 
                 await asyncio.sleep(5)

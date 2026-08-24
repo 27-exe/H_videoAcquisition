@@ -194,61 +194,81 @@ async def send_video(client,title,video_id,url,top,path,channel_id,ch_name,ch_id
 
 
 
-async def send_top5(client,ch_id,ranks,source,paths,ext = None):
+async def send_top5(client, ch_id, ranks, source, paths, ext=None):
+    """Send a Top-N digest to ch_id.
+
+    N is determined by the actual intersection of (non-empty ranks) and
+    (existing cover paths). If N is 0, skip the entire digest (no
+    message, no buttons). Otherwise:
+      - filter ranks and paths to valid pairs (zip + filter) so the
+        button grid and the album can never disagree on what's sent.
+      - generate Top1..TopN buttons, 2 per row, in album order.
+      - append optional promotion row if configured.
+      - log which ranks went to which channel for reconstruction.
+    """
     try:
-        today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
-        cap = f'本日 {source} top5\n日期:{today}\n'
-        cap_1 = f'点击按钮跳转到对应视频🥰'
-        buttons = [
-            [
-                Button.url('Top1', f'{ranks[0]}'),
-                Button.url('Top2', f'{ranks[1]}'),
-            ],
-            [
-                Button.url('Top3', f'{ranks[2]}'),
-                Button.url('Top4', f'{ranks[3]}'),
-                Button.url('Top5', f'{ranks[4]}'),
-            ],
+        # pair-filter: keep only (rank, path) where rank is non-empty AND
+        # path exists on disk. This is the single source of truth for
+        # "what we can actually send" — used for both the album and the
+        # button grid so they never disagree.
+        pairs = [
+            (r, p) for r, p in zip(ranks or [], paths or [])
+            if r and p and os.path.exists(p)
         ]
-        # \u53ef\u9009 promotion row\uff1a\u4ece config/telegram_send.local.yaml \u8bfb\uff0c
-        # enabled=true \u4e14 text/url \u90fd\u975e\u7a7a \u2192 \u8ffd\u52a0\u4e00\u4e2a button row\u3002
+        valid_ranks = [r for r, _ in pairs]
+        valid_paths = [p for _, p in pairs]
+
+        missing_paths = [p for p in (paths or []) if p and not os.path.exists(p)]
+        empty_ranks = [(i, r) for i, r in enumerate(ranks or []) if not r]
+        if missing_paths or empty_ranks:
+            logger.warning(
+                f"send_top5: filtered {len(ranks or []) - len(pairs)}/{len(ranks or [])} "
+                f"entries (missing_files={missing_paths}, empty_ranks={empty_ranks})"
+            )
+
+        n = len(pairs)
+        if n == 0:
+            logger.warning(
+                f"send_top5: skip ch_id={ch_id} source={source} "
+                f"(0 valid entries, nothing to send)"
+            )
+            return
+
+        today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+        cap = f'本日 {source} top{n}\n日期:{today}\n'
+        cap_1 = f'点击按钮跳转到对应视频🥰'
+
+        # Button grid: 2 per row, in album order. Top1..TopN labels.
+        buttons = []
+        for i in range(0, n, 2):
+            row = [Button.url(f'Top{i+1}', valid_ranks[i])]
+            if i + 1 < n:
+                row.append(Button.url(f'Top{i+2}', valid_ranks[i + 1]))
+            buttons.append(row)
+
+        # Optional promotion row: from config/telegram_send.local.yaml
         promo = _load_promotion()
         if promo and promo["enabled"] and promo["text"] and promo["url"]:
             buttons.append([Button.url(promo["text"], promo["url"])])
-            logger.info(f"send_top5 \u8ffd\u52a0 promotion row: text={promo['text']!r}")
-        # Always log which top5 ranks we're sending, even on success.
-        # Without this you can't reconstruct "which 5 ranks went to which
-        # channel" from bot.log alone.
-        valid_ranks = [r for r in ranks if r]
-        if len(valid_ranks) != 5:
-            logger.warning(
-                f"send_top5: ranks has {len(valid_ranks)} non-empty entries "
-                f"(expected 5): {ranks}"
-            )
-        existing_paths = [p for p in paths if p and os.path.exists(p)]
-        missing_paths = [p for p in paths if p and not os.path.exists(p)]
-        if missing_paths:
-            logger.warning(
-                f"send_top5: {len(missing_paths)}/{len(paths)} cover files missing: "
-                f"{missing_paths}"
-            )
+            logger.info(f"send_top5 追加 promotion row: text={promo['text']!r}")
+
         logger.info(
             f"send_top5: sending ch_id={ch_id} source={source} "
-            f"5 ranks, {len(existing_paths)}/{len(paths)} cover files present"
+            f"n={n}/{len(ranks or [])} ranks, {n}/{len(paths or [])} cover files present"
         )
 
-        await client.send_file(ch_id, paths, caption=cap)
+        await client.send_file(ch_id, valid_paths, caption=cap)
         await client.send_message(f'{ch_id}', message=cap_1, buttons=buttons)
         logger.info(
             f"send_top5: done ch_id={ch_id} source={source} date={today} "
-            f"buttons={len(buttons)} rows"
+            f"n={n} buttons={len(buttons)} rows"
         )
     except Exception as e:
         logger.error(
             f"send_top5: failed ch_id={ch_id} source={source} "
+            f"n={len(pairs) if 'pairs' in locals() else 0} "
             f"ranks={ranks} paths_count={len(paths) if paths else 0}: {e}",
             exc_info=True,
         )
 
 
-        
