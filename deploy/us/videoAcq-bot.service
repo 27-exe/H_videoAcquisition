@@ -4,18 +4,30 @@ Documentation=https://github.com/27-exe/videoAcquisition
 After=network-online.target ssh-tunnel.service
 Wants=network-online.target
 Requires=ssh-tunnel.service
-# Restart rate limit (older systemd needs this in [Unit], not [Service])
-StartLimitIntervalSec=600
-StartLimitBurst=20
+# 2026-08-24: 放宽到 10/1800s —— watchdog 兜底 Telethon 死循环时
+# 会更频繁触发 SIGKILL+restart,需要更大窗口避免熔断
+StartLimitIntervalSec=1800
+StartLimitBurst=10
 
 [Service]
-Type=simple
+# 2026-08-24: Type=simple → Type=notify
+# 原因:Type=simple 下 systemd 启动后立即认为进程 OK,但 client.start
+# 还要 1-2 秒才完成,期间进程不在主协程上;现在让 main.py 在 client.start
+# 完成后主动发 READY=1,systemd 才标 active=true
+# 同时 Type=notify 才能用 WatchdogSec
+Type=notify
+NotifyAccess=main
 User=27exe
 WorkingDirectory=/home/27exe/video/H_videoAcquisition-hk
 EnvironmentFile=/etc/videoAcq/bot.env
 ExecStart=/home/27exe/video/H_videoAcquisition-hk/.venv/bin/python main.py
-Restart=on-failure
-RestartSec=10
+# 2026-08-24: Restart=on-failure → Restart=on-abnormal
+# 原因:watchdog SIGKILL 不属于 on-failure 范畴,只有 on-abnormal 才会重启
+Restart=on-abnormal
+RestartSec=30
+# 2026-08-24: WatchdogSec=600 —— main.py 每 30s 发一次 WATCHDOG=1,
+# 10 分钟无心跳 = 进程被 systemd SIGKILL+restart,防 Telethon 内部死循环
+WatchdogSec=600
 # Memory cap same as old single-VPS configuration (currently 4GB swap,
 # ~1.9GB RAM): we don't add more since async bot launches only on schedule,
 # and now it's HK camoufox that uses memory, not US.
