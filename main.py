@@ -104,6 +104,14 @@ async def main():
         ts.start_all()
         logger.info("scheduler auto-installed by systemd (no /update needed)")
 
+        # 2026-09-10 临时:如果 RUN_DO_IWARA_ON_BOOT=1,启动后立即跑一次 do_iwara
+        # 用于调试;默认不启用。完成调试后请 unset 此 env 变量。
+        if os.environ.get("RUN_DO_IWARA_ON_BOOT") == "1":
+            from spiders.iwara.tasks import do_iwara
+            logger.warning("RUN_DO_IWARA_ON_BOOT=1 detected, triggering do_iwara() in 5s")
+            await asyncio.sleep(5)
+            await do_iwara(client, db)
+
         # 2026-08-24: 启动 watchdog 心跳,防 Telethon 内部死循环
         asyncio.create_task(_watchdog_loop(period=30))
         logger.info("watchdog notify started (period=30s, WatchdogSec=600)")
