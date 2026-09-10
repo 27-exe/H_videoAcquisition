@@ -93,17 +93,24 @@ async def fuck_cf(
     )
 
     async with sem:
-        async with AsyncCamoufox(
-            headless=True,
-            geoip=True,
-            humanize=True,
-            i_know_what_im_doing=True,
-            config={"forceScopeAccess": True},
-            disable_coop=True,
-            main_world_eval=True,
-            proxy=proxy,
-            addons=[os.path.abspath(ADDON_PATH)],
-        ) as browser:
+        # 2026-09-10: Issue #363 / #245 同款 —— camoufox 0.4.11 + Firefox 135 已知 firefox
+        # contentproc 不退出,即使 async with AsyncCamoufox 退出 browser 仍挂 → CPU 持续跑
+        # 把 async with AsyncCamoufox 改手动 try/finally,显式 page/context/browser.close()
+        # 兜底关闭 firefox contentproc(实测有效,见 L2 wiki 9-10 诊断)
+        browser = None
+        context = None
+        try:
+            browser = await AsyncCamoufox(
+                headless=True,
+                geoip=True,
+                humanize=True,
+                i_know_what_im_doing=True,
+                config={"forceScopeAccess": True},
+                disable_coop=True,
+                main_world_eval=True,
+                proxy=proxy,
+                addons=[os.path.abspath(ADDON_PATH)],
+            )
             context = await browser.new_context(storage_state=storage_state)
 
             for i, url in enumerate(url_list):
@@ -226,6 +233,19 @@ async def fuck_cf(
                         await page.close()
                     except Exception:
                         pass
+        finally:
+            # 2026-09-10: 显式 close page/context/browser,Issue #363/#245 同款兜底
+            # async with AsyncCamoufox 的 __aexit__ 不能保证 firefox contentproc 退出
+            if context is not None:
+                try:
+                    await context.close()
+                except Exception as e:
+                    logger.debug(f"context.close failed (best-effort): {e}")
+            if browser is not None:
+                try:
+                    await browser.close()
+                except Exception as e:
+                    logger.debug(f"browser.close failed (best-effort): {e}")
 
     return results[0] if isinstance(urls, str) else results
 
@@ -355,17 +375,21 @@ async def login(
     sem = _get_browser_semaphore()
 
     async with sem:
-        async with AsyncCamoufox(
-            headless=True,
-            geoip=True,
-            humanize=True,
-            i_know_what_im_doing=True,
-            config={"forceScopeAccess": True},
-            disable_coop=True,
-            main_world_eval=True,
-            proxy=proxy,
-            addons=[os.path.abspath(ADDON_PATH)],
-        ) as browser:
+        # 2026-09-10: 同 fuck_cf(),显式 close context/browser 兜底,见 Issue #363/#245
+        browser = None
+        context = None
+        try:
+            browser = await AsyncCamoufox(
+                headless=True,
+                geoip=True,
+                humanize=True,
+                i_know_what_im_doing=True,
+                config={"forceScopeAccess": True},
+                disable_coop=True,
+                main_world_eval=True,
+                proxy=proxy,
+                addons=[os.path.abspath(ADDON_PATH)],
+            )
             context = await browser.new_context()
             page = None
             try:
@@ -418,3 +442,14 @@ async def login(
                         await page.close()
                     except Exception:
                         pass
+        finally:
+            if context is not None:
+                try:
+                    await context.close()
+                except Exception as e:
+                    logger.debug(f"context.close failed (best-effort): {e}")
+            if browser is not None:
+                try:
+                    await browser.close()
+                except Exception as e:
+                    logger.debug(f"browser.close failed (best-effort): {e}")
