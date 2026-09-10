@@ -56,6 +56,9 @@ async def _watchdog_loop(period: int = 30) -> None:
 
 
 setup_logging(log_file='bot.log',level=logging.INFO)
+# 2026-09-10 临时 debug 模式:把 root logger 拉到 DEBUG,让 [DBG do_iwara] 日志出
+# 待 do_iwara 真实路径确认后,记得 revert 到 logging.INFO
+logging.getLogger().setLevel(logging.DEBUG)
 
 async def main():
     ts = None

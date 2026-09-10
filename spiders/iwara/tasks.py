@@ -147,6 +147,11 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
     vid_name = re.sub(r'^@', '', video_ch)
     max_download_failures = 3
 
+    import time
+    _t0 = time.monotonic()
+    def _elapsed(tag: str) -> float:
+        return time.monotonic() - _t0
+
     dual_mode = _dual_mode_enabled()
     fallback = _fallback_local_allowed()
     logger.info(
@@ -166,12 +171,15 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
             if dual_mode:
                 # Pass db skip_ids to HK so it can filter out already-sent
                 # videos before making API + deobfuscation calls.
+                _t_db = time.monotonic()
+                logger.debug(f"[DBG do_iwara/{attempt}] entering db.get_all_iwara_ids() at +{_elapsed('db_in'):.3f}s")
                 try:
                     skip_ids = list(await db.get_all_iwara_ids())
+                    logger.debug(
+                        f"[DBG do_iwara/{attempt}] db.get_all_iwara_ids() returned {len(skip_ids)} ids "
+                        f"in {time.monotonic()-_t_db:.3f}s at +{_elapsed('db_out'):.3f}s"
+                    )
                 except Exception as e:
-                    # If db lookup fails, we can't safely skip anything.  Fall
-                    # back to local browser (which calls if_exit internally)
-                    # rather than silently re-uploading every video.
                     logger.error(
                         f"get_all_iwara_ids failed: {e!r}; "
                         f"forcing local fallback because we cannot determine skip set"
@@ -186,15 +194,34 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
                         )
                         error = "db_lookup_failed"
                     continue  # to outer attempt retry
+                _t_hk = time.monotonic()
+                logger.debug(
+                    f"[DBG do_iwara/{attempt}] entering _fetch_iwara_via_hk() at +{_elapsed('hk_in'):.3f}s; "
+                    f"CRAWLER_URL={os.environ.get('CRAWLER_URL')!r}, "
+                    f"CRAWLER_TIMEOUT_SEC={os.environ.get('CRAWLER_TIMEOUT_SEC')!r}"
+                )
                 try:
                     spider = await _fetch_iwara_via_hk(cfg, skip_ids=skip_ids)
+                    logger.debug(
+                        f"[DBG do_iwara/{attempt}] _fetch_iwara_via_hk returned {type(spider).__name__} "
+                        f"in {time.monotonic()-_t_hk:.3f}s at +{_elapsed('hk_out'):.3f}s"
+                    )
                 except HKCrawlExhausted:
+                    logger.warning(
+                        f"[DBG do_iwara/{attempt}] HKCrawlExhausted after {time.monotonic()-_t_hk:.3f}s"
+                    )
                     # HK was reachable but failed its 3 remote attempts.  The
                     # local fallback below is explicitly one-shot: if it also
                     # fails, do_iwara returns False rather than re-entering the
                     # outer 10-minute legacy retry loop.
                     hk_crawl_exhausted = True
                     spider = None
+                except Exception as e:
+                    logger.exception(
+                        f"[DBG do_iwara/{attempt}] UNEXPECTED exception from _fetch_iwara_via_hk "
+                        f"after {time.monotonic()-_t_hk:.3f}s at +{_elapsed('hk_unexp'):.3f}s: {e!r}"
+                    )
+                    raise
                 if spider is None:
                     if _fallback_local_allowed():
                         logger.info(
@@ -213,8 +240,20 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
                 # else: HK succeeded, spider is set; do not call local.
             else:
                 # legacy single-VPS path (no HK env vars).
+                _t_local = time.monotonic()
+                logger.debug(f"[DBG do_iwara/{attempt}] entering local IwaraSpider.do_job() at +{_elapsed('local_in'):.3f}s")
                 iwara = IwaraSpider(cfg, db)
                 spider = await iwara.do_job()
+                logger.debug(
+                    f"[DBG do_iwara/{attempt}] local IwaraSpider.do_job returned {type(spider).__name__} "
+                    f"in {time.monotonic()-_t_local:.3f}s at +{_elapsed('local_out'):.3f}s"
+                )
+
+            logger.debug(
+                f"[DBG do_iwara/{attempt}] post-spider branch summary at +{_elapsed('post_spider'):.3f}s: "
+                f"spider={type(spider).__name__ if spider else 'None'} "
+                f"hk_crawl_exhausted={hk_crawl_exhausted} error={error!r}"
+            )
 
             if spider is None:
                 if hk_crawl_exhausted:
