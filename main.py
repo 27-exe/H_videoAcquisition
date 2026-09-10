@@ -1,4 +1,5 @@
 from telethon import TelegramClient
+from telethon.errors.rpcerrorlist import FloodWaitError
 import asyncio,logging,os
 from utils.logging_setup import setup_logging
 from pipelines.load import load_json
@@ -66,7 +67,25 @@ async def main():
         bot_token = token['bot_token']
 
         client = TelegramClient('bot', api_id, api_hash)
-        await client.start(bot_token=bot_token)
+        # 2026-09-10: 包 FloodWaitError 重试 —— watchdog SIGKILL 后 systemd
+        # 立即重启会撞上 Telethon 服务端的"短间隔多次 InitConnection"限流
+        # (556 秒 wait,典型)。让 bot 自己 sleep 等够再 start,避免 StartLimit
+        # 熔断导致 failed 状态、scheduler 几天不跑。
+        for attempt in range(1, 4):  # 3 次尝试
+            try:
+                await client.start(bot_token=bot_token)
+                logger.info("client.start OK on attempt %d", attempt)
+                break
+            except FloodWaitError as e:
+                wait_s = e.seconds + 5  # +5s buffer 防止边界提前
+                logger.warning(
+                    "FloodWaitError attempt %d/3: Telegram 要求等 %d 秒(实际 %d 秒 +5s buffer)",
+                    attempt, e.seconds, wait_s
+                )
+                if attempt >= 3:
+                    logger.error("FloodWaitError 3 次重试用尽,放弃启动")
+                    raise  # 让 systemd 接手,别静默吞
+                await asyncio.sleep(wait_s)
         logger.info("机器人已成功启动并运行")
 
         # 2026-08-24: Type=notify 必需 —— 告诉 systemd 我们已就绪,
