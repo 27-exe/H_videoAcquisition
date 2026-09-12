@@ -299,6 +299,9 @@ async def crawl_iwara(cfg: dict) -> dict:
     warnings: list[str] = []
     remint_used = False
     fallback_used = False
+    # HTTP 路径的原始异常。列表彻底失败时带着它,否则那条告警只有文字没有堆栈,
+    # 而「为什么回落」恰恰是最需要的信息。
+    http_err: Any = None
 
     async def _list_via_http(state):
         async with http_new_session(state) as hs:
@@ -315,6 +318,7 @@ async def crawl_iwara(cfg: dict) -> dict:
                 warnings.append("http_list_empty")
                 http_ok = False
         except IwaraHTTPBlocked as e:
+            http_err = e
             # cf_clearance 很可能过期 → 先用同一套 camoufox 环境重新 mint 再试一次
             logger.warning(f"iwara: HTTP list blocked ({e}) → 尝试重新 mint cf_clearance")
             ok, new_state = await _remint_iwara_state("list", proxy_url, pro_name, pro_word)
@@ -327,6 +331,7 @@ async def crawl_iwara(cfg: dict) -> dict:
                     logger.info(f"iwara: re-mint 后 list ok, n={len(list_rows)}")
                 except Exception as e2:  # noqa: BLE001
                     logger.warning(f"iwara: re-mint 后 list 仍失败 ({e2!r}) → 浏览器兜底")
+                    http_err = e2
                     http_ok = False
                     fallback_used = True
                     alerts.append(_build_alert(
@@ -351,6 +356,7 @@ async def crawl_iwara(cfg: dict) -> dict:
                 ))
         except Exception as e:  # noqa: BLE001 — never fail the crawl on HTTP issues
             logger.warning(f"iwara: HTTP list error ({e!r}) → browser fallback")
+            http_err = e
             warnings.append(f"http_list_error:{type(e).__name__}")
             http_ok = False
 
@@ -375,8 +381,13 @@ async def crawl_iwara(cfg: dict) -> dict:
                     "iwara:列表页彻底失败(HTTP + 浏览器双路均挂)",
                     "HTTP 路径被拦截/失败后已回落浏览器路径;浏览器路径 preprocess_iwara_list "
                     "重试 5 次仍返回空列表。本次爬取无数据返回。",
-                    exc=None,
-                    context={"platform": "iwara", "stage": "list", "path": "browser", "remint_used": remint_used},
+                    exc=http_err,
+                    context={
+                        "platform": "iwara", "stage": "list", "path": "browser",
+                        "remint_used": remint_used,
+                        "http_err": (str(http_err)[:300] if http_err else None),
+                        "browser_path": "preprocess_iwara_list returned empty after 5 retries",
+                    },
                     dedup_key="iwara:list_page_failed",
                 )],
                 "fallback_used": True,

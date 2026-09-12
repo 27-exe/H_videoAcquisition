@@ -284,6 +284,7 @@ async def crawl_hanime1(cfg: dict) -> dict:
     alerts: list[dict[str, Any]] = []
     warnings: list[str] = []
     fallback_used = False
+    http_err = None
 
     logger.info(f"hanime1 start: url={list_url} limit={limit} skip_ids={len(skip_ids)}")
     try:
@@ -300,6 +301,7 @@ async def crawl_hanime1(cfg: dict) -> dict:
                 logger.info(f"hanime1: list via HTTP ok, n={len(pairs)}")
             except HanimeHTTPBlocked as e:
                 logger.warning(f"hanime1: HTTP list blocked ({e}) → browser fallback")
+                http_err = e
                 fallback_used = True
                 alerts.append(_build_alert(
                     "hanime1:HTTP 列表被拦,已回落浏览器路径",
@@ -312,6 +314,7 @@ async def crawl_hanime1(cfg: dict) -> dict:
                 http_ok = False
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"hanime1: HTTP list error ({e!r}) → browser fallback")
+                http_err = e
                 warnings.append(f"http_list_error:{type(e).__name__}")
                 http_ok = False
 
@@ -324,8 +327,11 @@ async def crawl_hanime1(cfg: dict) -> dict:
                     "hanime1:列表页彻底失败(HTTP + 浏览器双路均挂)",
                     "HTTP 路径被拦后已回落浏览器路径;浏览器路径也未能取到列表页。"
                     "本次爬取无数据返回。",
-                    context={"platform": "hanime1", "stage": "list", "path": "browser"},
-                    exc=None, dedup_key="hanime1:list_page_failed",
+                    context={
+                        "platform": "hanime1", "stage": "list", "path": "browser",
+                        "http_err": (str(http_err)[:300] if http_err else None),
+                    },
+                    exc=http_err, dedup_key="hanime1:list_page_failed",
                 )]
                 err["elapsed_ms"] = int((datetime.now() - started).total_seconds() * 1000)
                 return err
