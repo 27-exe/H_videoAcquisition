@@ -30,9 +30,15 @@ async def aria2_session(uri: str, token: str):
             # 此处可以放置额外的清理代码
             logger.debug("Aria2 会话已关闭")
 
-async def _single_download(aria, url: str, dst: str, video_name: str, max_retries: int = 3):
+async def _single_download(aria, url: str, dst: str, video_name: str, max_retries=None):
     if url == 0:
         return 0
+
+    # 2026-09-12: 单个文件的轮内重试 3 → 2(ARIA2_MAX_RETRIES 可调)。
+    # iwara 的限流是小时级窗口,轮内重试基本无效 —— 一次 attempt 的成本是
+    # RETRY_SLEEP_S(15s)+ 判停窗口(宽限 90s + 25s),少试一次能省约 2 分钟/文件。
+    if max_retries is None:
+        max_retries = int(os.environ.get("ARIA2_MAX_RETRIES", "2"))
 
     # 可选：文件已存在直接跳过（防止重复下载）
     if os.path.exists(dst):
