@@ -61,3 +61,7 @@ yarl==1.22.0
 # crawler_service web framework (HK only; US bot 不要 import)
 fastapi>=0.110
 uvicorn[standard]>=0.27
+
+# iwara 无浏览器 HTTP 路径(HK crawler_service 专用;US bot 不要 import)
+# 必须与 camoufox 同属 Firefox 指纹族,否则复用 cf_clearance 会被 CF 拒(403)。
+curl_cffi==0.16.3

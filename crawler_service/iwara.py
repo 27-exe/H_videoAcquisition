@@ -29,6 +29,16 @@ from lxml import html as lxml_html
 
 from .browser import open_browser, open_page
 from .fuck_cf import fuck_cf, preprocess_iwara_list
+# 2026-09-12: 浏览器无关的 HTTP 路径(apiq JSON API + curl_cffi 复用 cf_clearance)。
+# 浏览器仅用于 mint/兜底,见 iwara_http.py 顶部说明与 L2 handoff 文档。
+from .iwara_http import (
+    IwaraHTTPBlocked,
+    fetch_list as http_fetch_list,
+    fetch_video as http_fetch_video,
+    http_concurrency as http_concurrency_limit,
+    http_mode_enabled,
+    new_session as http_new_session,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -206,30 +216,53 @@ async def crawl_iwara(cfg: dict) -> dict:
         f"proxy={'yes' if proxy_url else 'no'} state={'yes' if storage_state else 'no'}"
     )
 
-    # ── 1) list page via the ported preprocess_iwara_list ───────────────
-    # This brings over the original retry/backoff/CF-solver behaviour and
-    # the >=20-items success threshold. Empty list → failure, not "ok=true".
-    pairs = await preprocess_iwara_list(
-        list_url,
-        proxy_str=proxy_url,
-        pro_name=pro_name,
-        pro_word=pro_word,
-        storage_state=storage_state,
-        max_retries=5,
-        min_items=20,
-    )
-    if not pairs:
-        return {
-            "ok": False,
-            "source": "iwara",
-            "error": "list_page_failed",
-            "message": "preprocess_iwara_list returned empty after retries",
-            "elapsed_ms": int((datetime.now() - started).total_seconds() * 1000),
-        }
-    logger.info(f"iwara: list page parsed {len(pairs)} items")
+    # ── 1) list page ────────────────────────────────────────────────────
+    # Preferred: apiq JSON API over HTTP (no browser). Fallback: the ported
+    # preprocess_iwara_list (camoufox + CF solver) — kept for the case where
+    # cf_clearance is missing/expired, or iwara changes its API shape.
+    http_ok = http_mode_enabled()
+    list_rows: list[tuple[str, str]] = []  # (title, source_url)
+
+    if http_ok:
+        try:
+            async with http_new_session(storage_state) as hs:
+                got = await http_fetch_list(hs, keywords, page_num)
+            if got:
+                list_rows = [(r["title"], r["source_url"]) for r in got]
+                logger.info(f"iwara: list via HTTP API ok, n={len(list_rows)}")
+            else:
+                logger.warning("iwara: HTTP list returned 0 items → browser fallback")
+                http_ok = False
+        except IwaraHTTPBlocked as e:
+            logger.warning(f"iwara: HTTP list blocked ({e}) → browser fallback")
+            http_ok = False
+        except Exception as e:  # noqa: BLE001 — never fail the crawl on HTTP issues
+            logger.warning(f"iwara: HTTP list error ({e!r}) → browser fallback")
+            http_ok = False
+
+    if not http_ok:
+        pairs = await preprocess_iwara_list(
+            list_url,
+            proxy_str=proxy_url,
+            pro_name=pro_name,
+            pro_word=pro_word,
+            storage_state=storage_state,
+            max_retries=5,
+            min_items=20,
+        )
+        if not pairs:
+            return {
+                "ok": False,
+                "source": "iwara",
+                "error": "list_page_failed",
+                "message": "preprocess_iwara_list returned empty after retries",
+                "elapsed_ms": int((datetime.now() - started).total_seconds() * 1000),
+            }
+        logger.info(f"iwara: list page parsed {len(pairs)} items (browser path)")
+        list_rows = list(pairs)
 
     items: list[dict[str, Any]] = []
-    for rank, (title, source_url) in enumerate(pairs[:limit], start=1):
+    for rank, (title, source_url) in enumerate(list_rows[:limit], start=1):
         m = re.match(r"https?://www\.iwara\.tv/video/([a-zA-Z0-9_-]+)/?", source_url)
         if not m:
             continue
@@ -267,11 +300,17 @@ async def crawl_iwara(cfg: dict) -> dict:
         f"(skipped {len(items) - len(api_needed)} via skip_ids)"
     )
 
-    # Batch size / 并发 / 批次间隔改为 env 可调(2026-09-12 加速改造)。
-    # 默认值与改造前完全一致(5 / 1 / 10)以保证可回滚:
-    #   IWARA_API_BATCH_SIZE   每批 URL 数(每批 = 1 次 fuck_cf = 1 次浏览器冷启动)
-    #   IWARA_API_CONCURRENCY  同时进行的批次数(实际仍受 browser 端 semaphore 约束)
-    #   IWARA_API_BATCH_SLEEP  批次间礼貌间隔秒数(仅串行模式生效)
+    # 两条路径(2026-09-12 架构改造):
+    #   HTTP   —— curl_cffi 仿冒 Firefox + 复用 cf_clearance 打 apiq JSON API。
+    #             实测 30 个 URL 共 1.5s、成功率 30/30(浏览器路径需 300-1500s/86%)。
+    #   浏览器 —— camoufox + fuck_cf;仅在 HTTP 被 CF 拦 / IWARA_HTTP_MODE=0 时启用,
+    #             也是 cf_clearance 失效时的自救路径。
+    # env:
+    #   IWARA_HTTP_MODE=1|0        优先 HTTP(默认 1)
+    #   IWARA_HTTP_CONCURRENCY=5   HTTP 并发度
+    #   IWARA_API_BATCH_SIZE=5     浏览器路径每批 URL 数(每批 = 1 次浏览器冷启动)
+    #   IWARA_API_CONCURRENCY=1    浏览器路径并发批次数(>1 会撞上游限流,慎用)
+    #   IWARA_API_BATCH_SLEEP=10   浏览器路径批次间礼貌间隔(仅串行生效)
     api_batch_size = max(1, int(os.environ.get("IWARA_API_BATCH_SIZE", "5")))
     api_concurrency = max(1, int(os.environ.get("IWARA_API_CONCURRENCY", "1")))
     api_batch_sleep = float(os.environ.get("IWARA_API_BATCH_SLEEP", "10"))
@@ -280,66 +319,124 @@ async def crawl_iwara(cfg: dict) -> dict:
     api_fail = 0
     api_skip = len(items) - len(api_needed)
 
-    batches = [
-        api_needed[i:i + api_batch_size]
-        for i in range(0, len(api_needed), api_batch_size)
-    ]
-    logger.info(
-        f"iwara api plan: {len(batches)} batch(es) of <= {api_batch_size}, "
-        f"concurrency={api_concurrency}, inter-batch sleep={api_batch_sleep}s"
-    )
-    _api_sem = asyncio.Semaphore(api_concurrency)
+    def _consume_api_content(idx: int, vid: str, content: Any) -> bool:
+        """Turn one apiq payload into items[idx]['_api_file'] / download_url_list[idx]."""
+        if content == 0 or content == "" or content is None or isinstance(content, Exception):
+            logger.warning(f"iwara api fail: vid={vid} result={type(content).__name__}")
+            download_url_list[idx] = ""
+            return False
+        # fuck_cf(need_resp=True) 返回已解析对象;HTTP 路径同样直接给 dict。
+        # 仅在拿到字符串时才走 JSON 字符串解析(兼容旧行为)。
+        if isinstance(content, (dict, list)):
+            parsed = [content] if isinstance(content, dict) else content
+        else:
+            parsed = _parse_api_json(str(content))
+        if not parsed:
+            logger.warning(f"iwara api parse empty: vid={vid}")
+            download_url_list[idx] = ""
+            return False
+        items[idx]["_api_file"] = parsed[0]
+        return True
 
-    async def _resolve_api_batch(bi: int, batch: list[tuple[int, str]]) -> None:
-        """Run one fuck_cf() batch; fill download_url_list / items[*]._api_file."""
-        nonlocal api_ok, api_fail
-        urls: list = [f"{IWARA_API}/{vid}" for _, vid in batch]
+    # ── 2a) HTTP path(preferred) ────────────────────────────────────────
+    if http_ok and api_needed:
+        _http_conc = http_concurrency_limit()
+        _http_sem = asyncio.Semaphore(_http_conc)
         logger.info(
-            f"iwara api batch #{bi} [{batch[0][0]}-{batch[-1][0]}] "
-            f"n={len(batch)} ids={[v for _, v in batch]}"
+            f"iwara api plan (HTTP): {len(api_needed)} vids, concurrency={_http_conc}"
         )
-        async with _api_sem:
-            results = await fuck_cf(
-                urls,
-                proxy_str=proxy_url,
-                pro_name=pro_name,
-                pro_word=pro_word,
-                storage_state=storage_state,
-                need_resp=True,  # apiq.iwara.tv responds with JSON
-                select=None,
-                max_retries=3,
-            )
-        for (idx, vid), content in zip(batch, results):
-            if content == 0 or content == "" or isinstance(content, Exception):
-                api_fail += 1
-                logger.warning(f"iwara api fail: vid={vid} result={type(content).__name__}")
-                download_url_list[idx] = ""
-                continue
-            # fuck_cf(need_resp=True) returns the parsed JSON object directly
-            # (dict for a single video, list for an array response). Only fall
-            # back to the JSON-string parser when the content is a string.
-            if isinstance(content, (dict, list)):
-                parsed = [content] if isinstance(content, dict) else content
-            else:
-                parsed = _parse_api_json(str(content))
-            if not parsed:
-                api_fail += 1
-                logger.warning(f"iwara api parse empty: vid={vid}")
-                download_url_list[idx] = ""
-                continue
-            api_ok += 1
-            # stash the first parsed dict for the deobf stage
-            items[idx]["_api_file"] = parsed[0]
+        try:
+            async with http_new_session(storage_state) as hs:
 
-    if api_concurrency == 1:
-        # 串行:保留原有批次间 sleep(对 iwara 礼貌,避免风控)
-        for bi, batch in enumerate(batches):
-            await _resolve_api_batch(bi, batch)
-            if bi < len(batches) - 1:
-                await asyncio.sleep(api_batch_sleep)
-    else:
-        # 并发:批量同时投递;不再额外 sleep(并发本身已摊开请求)
-        await asyncio.gather(*[_resolve_api_batch(bi, b) for bi, b in enumerate(batches)])
+                async def _one_http(idx: int, vid: str) -> tuple[int, str, Any, Any]:
+                    async with _http_sem:
+                        try:
+                            data = await http_fetch_video(hs, vid)
+                            return idx, vid, data, None
+                        except Exception as e:  # noqa: BLE001
+                            return idx, vid, None, e
+
+                tasks = [asyncio.create_task(_one_http(i, v)) for i, v in api_needed]
+                blocked_err: Any = None
+                for fut in asyncio.as_completed(tasks):
+                    idx, vid, data, err = await fut
+                    if err is not None:
+                        if isinstance(err, IwaraHTTPBlocked):
+                            blocked_err = blocked_err or err
+                            continue
+                        api_fail += 1
+                        download_url_list[idx] = ""
+                        logger.warning(f"iwara http api error: vid={vid} {err!r}")
+                        continue
+                    if _consume_api_content(idx, vid, data):
+                        api_ok += 1
+                    else:
+                        api_fail += 1
+                if blocked_err is not None:
+                    raise IwaraHTTPBlocked(str(blocked_err))
+            logger.info(
+                f"iwara api (HTTP) done: ok={api_ok} fail={api_fail} of {len(api_needed)}"
+            )
+        except IwaraHTTPBlocked as e:
+            logger.warning(
+                f"iwara: HTTP api blocked ({e}) → browser fallback for the rest "
+                f"(ok={api_ok} fail={api_fail} so far)"
+            )
+            http_ok = False
+        except Exception as e:  # noqa: BLE001 — never fail the whole crawl on HTTP issues
+            logger.warning(f"iwara: HTTP api error ({e!r}) → browser fallback")
+            http_ok = False
+
+    # ── 2b) browser path(fallback / IWARA_HTTP_MODE=0) ──────────────────
+    if not http_ok:
+        remaining = [(i, v) for (i, v) in api_needed if "_api_file" not in items[i]]
+        logger.info(
+            f"iwara api plan (browser): {len(remaining)}/{len(api_needed)} vids remain"
+        )
+        batches = [
+            remaining[i:i + api_batch_size]
+            for i in range(0, len(remaining), api_batch_size)
+        ]
+        logger.info(
+            f"iwara api plan: {len(batches)} batch(es) of <= {api_batch_size}, "
+            f"concurrency={api_concurrency}, inter-batch sleep={api_batch_sleep}s"
+        )
+        _api_sem = asyncio.Semaphore(api_concurrency)
+
+        async def _resolve_api_batch(bi: int, batch: list[tuple[int, str]]) -> None:
+            """Run one fuck_cf() batch; fill download_url_list / items[*]._api_file."""
+            nonlocal api_ok, api_fail
+            urls: list = [f"{IWARA_API}/{vid}" for _, vid in batch]
+            logger.info(
+                f"iwara api batch #{bi} [{batch[0][0]}-{batch[-1][0]}] "
+                f"n={len(batch)} ids={[v for _, v in batch]}"
+            )
+            async with _api_sem:
+                results = await fuck_cf(
+                    urls,
+                    proxy_str=proxy_url,
+                    pro_name=pro_name,
+                    pro_word=pro_word,
+                    storage_state=storage_state,
+                    need_resp=True,  # apiq.iwara.tv responds with JSON
+                    select=None,
+                    max_retries=3,
+                )
+            for (idx, vid), content in zip(batch, results):
+                if _consume_api_content(idx, vid, content):
+                    api_ok += 1
+                else:
+                    api_fail += 1
+
+        if api_concurrency == 1:
+            # 串行:保留原有批次间 sleep(对 iwara 礼貌,避免风控)
+            for bi, batch in enumerate(batches):
+                await _resolve_api_batch(bi, batch)
+                if bi < len(batches) - 1:
+                    await asyncio.sleep(api_batch_sleep)
+        else:
+            # 并发:批量同时投递;不再额外 sleep(并发本身已摊开请求)
+            await asyncio.gather(*[_resolve_api_batch(bi, b) for bi, b in enumerate(batches)])
 
     logger.info(
         f"iwara api done: skip={api_skip} ok={api_ok} fail={api_fail} total={len(items)}"
