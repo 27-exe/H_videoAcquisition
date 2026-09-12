@@ -41,16 +41,23 @@ async def _single_download(aria, url: str, dst: str, video_name: str, max_retrie
             logger.error(f"[{video_name}] \u5220\u9664 0-byte \u6587\u4ef6\u5931\u8d25: {e}")
             return 0
 
+    # 2026-09-12 实测(iwara CDN = nginx):单文件 16 并发连接会被 server 端掐断 ——
+    # 同一个 URL 用单连接 curl 29s 完整下完(156MB),而 aria2 -x16 会卡在 96-98%
+    # 不动,随后重试全部拿到 completed=0/0(连 Content-Length 都取不到,该 CDN 对
+    # HEAD 直接返回 405)。3s 的重试间隔又正好撞在限流窗口内,于是 3 次全灭。
+    # 吞吐上 16 连接只有 ~7MB/s,单连接就有 ~5.2MB/s —— 多出来的 40% 不值得拿尾部
+    # 失败率去换。降到 2 并拉长冷却;可用 env 一键回退到旧值。
     options = {
         "dir": os.path.dirname(dst),
         "out": os.path.basename(dst),
-        "max-connection-per-server": "16",
-        "split": "16",
+        "max-connection-per-server": os.environ.get("ARIA2_MAX_CONN_PER_SERVER", "2"),
+        "split": os.environ.get("ARIA2_SPLIT", "2"),
         "min-split-size": "1M",
         "continue": "true",
         # 让 aria2 自己先内部重试几次
         "max-tries": str(max_retries + 2),
-        "retry-wait": "3",
+        # 3s 太短:被 CDN 限流后需要更长的冷却窗口才能再连上
+        "retry-wait": os.environ.get("ARIA2_RETRY_WAIT", "15"),
     }
 
     for attempt in range(1, max_retries + 1):

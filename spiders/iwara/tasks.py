@@ -175,7 +175,9 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
     video_ch = cfg['video_channel']
     pic_ch = cfg['pic_channel']
     vid_name = re.sub(r'^@', '', video_ch)
-    max_download_failures = 3
+    # 2026-09-12: 3 → 5。历史基线是每次运行 1-6 个 CDN 偶发失败(与代码无关),
+    # 阈值 3 会让正常波动就触发整轮重试(白跑 30 分钟)。env 可调。
+    max_download_failures = int(os.environ.get("IWARA_MAX_DOWNLOAD_FAILURES", "5"))
 
     import time
     _t0 = time.monotonic()
