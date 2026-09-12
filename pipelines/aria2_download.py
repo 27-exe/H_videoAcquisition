@@ -6,6 +6,17 @@ from pipelines.load import load_json
 
 logger = logging.getLogger(__name__)
 
+# ── 判停/重试参数(2026-09-12,全部 env 可调)────────────────────────────
+# START_GRACE_S: 启动宽限期。last_completed 初值是 0,若不区分「还没开始传」
+#   和「传到一半停了」,任何启动慢于 25s 的文件都会被 forceRemove 误杀 ——
+#   重试又是 0,三次全灭而日志只有 0/0,看不出原因(实测踩过)。
+# STALL_CHECKS: 宽限期过后,连续多少次(每次 5s)无进度才算真卡住。
+# RETRY_SLEEP_S: 两次 attempt 之间的冷却。原来硬编码 3s —— 被 CDN 限流时
+#   3s 根本不够冷却,重试直接掉进同一个窗口。
+START_GRACE_S = float(os.environ.get("ARIA2_START_GRACE_S", "90"))
+STALL_CHECKS = int(os.environ.get("ARIA2_STALL_CHECKS", "5"))
+RETRY_SLEEP_S = float(os.environ.get("ARIA2_RETRY_SLEEP_S", "15"))
+
 @asynccontextmanager
 async def aria2_session(uri: str, token: str):
 
@@ -68,6 +79,7 @@ async def _single_download(aria, url: str, dst: str, video_name: str, max_retrie
             last_completed = 0
             stuck_count = 0  # 计数器：记录进度不动的次数
             start_time = time.monotonic()  # 下载开始时间，用于超时检测
+            transferred = False  # 是否已经真的收到过字节
 
             while True:
                 status = await aria.tellStatus(gid)
@@ -95,8 +107,18 @@ async def _single_download(aria, url: str, dst: str, video_name: str, max_retrie
                     )
                     break  # 触发外层 for 循环重试
 
+                if completed > 0:
+                    transferred = True
+
+                # --- 启动宽限 ---
+                # 还没收到任何字节时不判停:否则「25s 内尚未启动」会被误当成
+                # 「卡住」而 forceRemove,重试又从头开始,三次全灭只剩 0/0。
+                if not transferred and (time.monotonic() - start_time) < START_GRACE_S:
+                    await asyncio.sleep(5)
+                    continue
+
                 # --- 卡住检测逻辑 ---
-                # 检测条件：进度无变化（包括 total=0 时 completed 永远为 0 的情况）
+                # 检测条件：进度无变化（宽限期后 completed 仍不动）
                 if completed == last_completed:
                     stuck_count += 1
                 else:
@@ -104,12 +126,17 @@ async def _single_download(aria, url: str, dst: str, video_name: str, max_retrie
 
                 last_completed = completed
 
-                # 条件 1：连续 5 次检查（约 25 秒）进度都没动
-                if stuck_count >= 5:
+                # 条件 1：连续 STALL_CHECKS 次检查(约 STALL_CHECKS*5 秒)进度都没动
+                if stuck_count >= STALL_CHECKS:
                     speed = int(status.get("downloadSpeed", 0))
+                    # 把 aria2 的诊断字段一起打出来 —— 没有它,「卡住」只能靠猜
                     logger.warning(
                         f"[{video_name}] stalled: completed={completed}/{total} "
-                        f"speed={speed} B/s, no progress for 25s, forcing retry"
+                        f"speed={speed} B/s, no progress for {STALL_CHECKS * 5}s, forcing retry "
+                        f"(errorCode={status.get('errorCode', '-')}, "
+                        f"connections={status.get('connections', '-')}, "
+                        f"transferred={transferred}, "
+                        f"files={str(status.get('files'))[:160]})"
                     )
                     try:
                         await aria.forceRemove(gid)
@@ -142,8 +169,10 @@ async def _single_download(aria, url: str, dst: str, video_name: str, max_retrie
                     pass  # 清理失败也无所谓
 
         if attempt < max_retries:
-            logger.info(f"[{video_name}] 等待 3 秒后进行第 {attempt + 1} 次重试...")
-            await asyncio.sleep(3)
+            logger.info(
+                f"[{video_name}] 等待 {RETRY_SLEEP_S:.0f} 秒后进行第 {attempt + 1} 次重试..."
+            )
+            await asyncio.sleep(RETRY_SLEEP_S)
 
     logger.error(f"[{video_name}] 已达到最大重试次数 {max_retries}，最终失败。")
     # 清理残留的部分下载文件
