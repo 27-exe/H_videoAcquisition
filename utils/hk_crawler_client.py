@@ -35,8 +35,18 @@ class HKCrawlerError(Exception):
     between unreachable (network-level: must NOT retry, fall back to local
     browser immediately) and crawl failure (HK reachable but returned a bad
     payload: retry up to 3 times, then fall back).
+
+    2026-09-12: errors now carry the HK-side diagnosis. HK deliberately holds
+    no Telegram credentials, so it ships structured alerts (title/detail/
+    context/stack) in the crawl response; we attach them to the exception so
+    the caller can forward them to the operator's Telegram.
     """
-    pass
+
+    def __init__(self, message, *, alerts=None, warnings=None, remote_error=None):
+        super().__init__(message)
+        self.alerts = alerts or []
+        self.warnings = warnings or []
+        self.remote_error = remote_error
 
 
 class HKUnreachable(HKCrawlerError):
@@ -70,13 +80,22 @@ def _required_env(name: str) -> str:
     return value
 
 
-def fetch_via_hk_crawler(src: str, body: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def fetch_via_hk_crawler(
+    src: str,
+    body: dict[str, Any] | None = None,
+    meta: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """
     POST to HK crawler and return the parsed items list.
 
     src: 'iwara' or 'hanime1'
     body: optional extra params merged into default request body
           (keywords, page, limit, etc.)
+    meta: optional out-param. On return it is updated with the HK-side
+          diagnosis for this call — keys: ``alerts`` (list of structured
+          failure reports carrying a stack), ``warnings``, ``fallback_used``,
+          ``remint_used``. Callers forward ``alerts`` to Telegram; HK never
+          holds Telegram credentials itself.
 
     Returns:
         list of {rank, id, title, source_url, download_url} dicts.
@@ -149,11 +168,26 @@ def fetch_via_hk_crawler(src: str, body: dict[str, Any] | None = None) -> list[d
         msg = data.get("message") if isinstance(data, dict) else None
         # ok=false includes the "list_page_failed" / "parse_failed" / "internal_error"
         # cases — HK is reachable, browser failed inside.  Retry.
-        raise HKCrawlFailure(f"hk crawler ok=false (err={err}, msg={msg})")
+        raise HKCrawlFailure(
+            f"hk crawler ok=false (err={err}, msg={msg})",
+            alerts=(data.get("alerts") or []) if isinstance(data, dict) else [],
+            warnings=(data.get("warnings") or []) if isinstance(data, dict) else [],
+            remote_error=err,
+        )
 
     items = data.get("items")
     if not isinstance(items, list):
         raise HKCrawlFailure(f"items not a list: {type(items)}")
 
-    logger.info(f"hk crawler {src}: got {len(items)} items in {data.get('elapsed_ms')}ms")
+    if meta is not None:
+        meta["alerts"] = data.get("alerts") or []
+        meta["warnings"] = data.get("warnings") or []
+        meta["fallback_used"] = bool(data.get("fallback_used"))
+        meta["remint_used"] = bool(data.get("remint_used"))
+
+    logger.info(
+        f"hk crawler {src}: got {len(items)} items in {data.get('elapsed_ms')}ms"
+        f" (alerts={len(meta.get('alerts') or []) if meta else 0}, "
+        f"fallback_used={data.get('fallback_used')}, remint_used={data.get('remint_used')})"
+    )
     return items

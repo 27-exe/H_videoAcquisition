@@ -11,6 +11,8 @@ from utils.hk_crawler_client import (
     fetch_via_hk_crawler, HKCrawlerError, HKUnreachable, HKCrawlFailure,
     HKCrawlExhausted,
 )
+# 2026-09-12: 失败告警。HK 不持有 TG 凭据,它把结构化诊断(含堆栈)放进爬取响应,由这里转发。
+from utils.notify import forward_hk_alerts as _forward_hk_alerts, notify_admin
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +62,7 @@ async def _fetch_hanime1_via_hk(
     do_hanime1 via re.search on the source_url).
     """
     last_err = None
+    meta: dict = {}
     for attempt in range(1, hk_max_retries + 1):
         try:
             # 2026-09-12: 同 iwara —— 阻塞的同步调用必须丢线程池,否则冻住 event loop
@@ -74,12 +77,24 @@ async def _fetch_hanime1_via_hk(
                     "sort": cfg.get("sort", "today-popular"),
                     **({"skip_ids": skip_ids} if skip_ids is not None else {}),
                 },
+                meta,
             )
+            await _forward_hk_alerts(meta.get("alerts"), "hanime1")
+            if meta.get("fallback_used"):
+                logger.warning("hanime1:HK 侧使用了浏览器兜底路径")
             break  # success
         except HKUnreachable as e:
             logger.warning(
                 f"hk crawler hanime1 unreachable (attempt {attempt}/{hk_max_retries}): {e}; "
                 f"falling back to local browser immediately"
+            )
+            await notify_admin(
+                "hanime1:HK crawler 不可达",
+                "调用 HK crawler 在网络层失败,已立刻回落**本机浏览器**路径。"
+                "常见原因:ssh-tunnel 断开、HK crawler 服务挂了、HK 机器网络异常。",
+                exc=e,
+                context={"platform": "hanime1", "stage": "hk_call", "attempt": attempt},
+                dedup_key="hanime1:hk_unreachable",
             )
             return None
         except HKCrawlFailure as e:
@@ -87,6 +102,7 @@ async def _fetch_hanime1_via_hk(
             logger.warning(
                 f"hk crawler hanime1 crawl failure (attempt {attempt}/{hk_max_retries}): {e}"
             )
+            await _forward_hk_alerts(getattr(e, "alerts", None), "hanime1")
             if attempt < hk_max_retries:
                 logger.info(f"retrying HK hanime1 after {hk_retry_delay}s...")
                 await asyncio.sleep(hk_retry_delay)
@@ -182,6 +198,17 @@ async def do_hanime1(client, db: DataBase, max_retries: int = 3, retry_wait_minu
                             "falling back to local AsyncCamoufox for hanime1"
                             + " (one-shot after HK exhaustion)" if hk_crawl_exhausted else
                             "falling back to local AsyncCamoufox for hanime1"
+                        )
+                        await notify_admin(
+                            "hanime1:HK 失败,启用本机浏览器最终兜底",
+                            "HK crawler 不可用/爬取失败,正在用 US 本机 AsyncCamoufox 兜底。"
+                            "浏览器负载会压到 US 机器上。",
+                            context={
+                                "platform": "hanime1", "stage": "local_fallback",
+                                "attempt": attempt, "hk_crawl_exhausted": hk_crawl_exhausted,
+                            },
+                            dedup_key="hanime1:local_fallback",
+                            client=client,
                         )
                         hm = Hanime1spider(cfg, db)
                         spider = await hm.do_job()
@@ -318,6 +345,16 @@ async def do_hanime1(client, db: DataBase, max_retries: int = 3, retry_wait_minu
                         continue
                     else:
                         logger.error('已达到最大重试次数，但仍未成功发送30条预览图')
+                        await notify_admin(
+                            "hanime1:发送数量不足,任务最终失败",
+                            f"重试 {max_retries} 次后仍只发出 {successful_preview_count}/30 条预览图。",
+                            context={
+                                "platform": "hanime1", "stage": "send_preview",
+                                "attempt": attempt, "sent": successful_preview_count,
+                            },
+                            dedup_key="hanime1:preview_shortfall",
+                            client=client,
+                        )
                         return False
 
                 # 本轮成功，发送 Top 5
@@ -331,6 +368,22 @@ async def do_hanime1(client, db: DataBase, max_retries: int = 3, retry_wait_minu
 
             except Exception as batch_error:
                 logger.error(f"第 {attempt} 次尝试中的批处理出错: {batch_error}", exc_info=True)
+
+                await notify_admin(
+                    f"hanime1:发送阶段出错(第 {attempt}/{max_retries} 次)",
+                    "下载/上传/发帖批处理抛异常。已发出的视频消息与数据库记录会保留,"
+                    "预览图消息已回滚。",
+                    exc=batch_error,
+                    context={
+                        "platform": "hanime1",
+                        "stage": "send_batch",
+                        "attempt": attempt,
+                        "video_uploaded": len([v for v in video_ch_ids if v and v != 0]),
+                        "preview_sent": len([m for m in preview_ch_ids if m]),
+                    },
+                    dedup_key=f"hanime1:send_batch_fail:{type(batch_error).__name__}",
+                    client=client,
+                )
 
                 # 批处理异常时，删除预览图频道的消息，保留视频频道的消息和数据库记录
                 logger.warning(f"批处理异常，已发送的 {len([ch_id for ch_id in video_ch_ids if ch_id != 0])} 条视频消息和数据库记录将保留")
@@ -357,6 +410,14 @@ async def do_hanime1(client, db: DataBase, max_retries: int = 3, retry_wait_minu
                 continue
             else:
                 logger.error('已达到最大重试次数，任务失败')
+                await notify_admin(
+                    "hanime1:任务重试耗尽,最终失败",
+                    f"每次尝试都抛出未预期异常,已重试 {max_retries} 次,任务放弃。",
+                    exc=e,
+                    context={"platform": "hanime1", "stage": "task", "attempt": attempt},
+                    dedup_key="hanime1:task_exhausted",
+                    client=client,
+                )
                 return False
 
     return False

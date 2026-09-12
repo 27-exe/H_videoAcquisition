@@ -11,6 +11,9 @@ from utils.hk_crawler_client import (
     fetch_via_hk_crawler, HKCrawlerError, HKUnreachable, HKCrawlFailure,
     HKCrawlExhausted,
 )
+# 2026-09-12: 失败告警。HK 侧不持有 TG 凭据,它把结构化诊断(含堆栈)放进爬取响应,
+# 由这里转发到 admin 的 Telegram —— 本进程已经握着一个活着的 client。
+from utils.notify import forward_hk_alerts as _forward_hk_alerts, notify_admin
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +71,7 @@ async def _fetch_iwara_via_hk(
     """
     import asyncio
     last_err = None
+    meta: dict = {}
     for attempt in range(1, hk_max_retries + 1):
         try:
             # 2026-09-12: fetch_via_hk_crawler 是同步函数 + 阻塞 requests.post。
@@ -84,7 +88,16 @@ async def _fetch_iwara_via_hk(
                     "limit": int(cfg.get("limit", 30)),
                     **({"skip_ids": skip_ids} if skip_ids is not None else {}),
                 },
+                meta,
             )
+            # HK 侧的降级/兜底诊断(回落浏览器、重新 mint 过 cookie 等)。
+            # 正常爬取时 alerts 为空 → 这里不发任何消息。
+            await _forward_hk_alerts(meta.get("alerts"), "iwara")
+            if meta.get("fallback_used") or meta.get("remint_used"):
+                logger.warning(
+                    f"iwara:HK 侧降级路径(remint_used={meta.get('remint_used')}, "
+                    f"fallback_used={meta.get('fallback_used')})"
+                )
             break  # success
         except HKUnreachable as e:
             # Network-level failure: no point retrying — fall back immediately.
@@ -92,12 +105,23 @@ async def _fetch_iwara_via_hk(
                 f"hk crawler iwara unreachable (attempt {attempt}/{hk_max_retries}): {e}; "
                 f"falling back to local browser immediately"
             )
+            await notify_admin(
+                "iwara:HK crawler 不可达",
+                "调用 HK crawler 在网络层失败,已立刻回落**本机浏览器**路径"
+                "(慢,且占用 US 本机资源)。常见原因:ssh-tunnel 断开、"
+                "HK crawler 服务挂了、HK 机器网络异常。",
+                exc=e,
+                context={"platform": "iwara", "stage": "hk_call", "attempt": attempt},
+                dedup_key="iwara:hk_unreachable",
+            )
             return None
         except HKCrawlFailure as e:
             last_err = e
             logger.warning(
                 f"hk crawler iwara crawl failure (attempt {attempt}/{hk_max_retries}): {e}"
             )
+            # HK 可达但爬取失败 —— 把 HK 侧诊断(含堆栈)转发给 operator
+            await _forward_hk_alerts(getattr(e, "alerts", None), "iwara")
             if attempt < hk_max_retries:
                 logger.info(
                     f"retrying HK iwara after {hk_retry_delay}s..."
@@ -234,6 +258,17 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
                             "falling back to local AsyncCamoufox for iwara"
                             + " (one-shot after HK exhaustion)" if hk_crawl_exhausted else
                             "falling back to local AsyncCamoufox for iwara"
+                        )
+                        await notify_admin(
+                            "iwara:HK 失败,启用本机浏览器最终兜底",
+                            "HK crawler 不可用/爬取失败,正在用 US 本机 AsyncCamoufox 兜底。"
+                            "浏览器负载会压到 US 机器上,且明显更慢。",
+                            context={
+                                "platform": "iwara", "stage": "local_fallback",
+                                "attempt": attempt, "hk_crawl_exhausted": hk_crawl_exhausted,
+                            },
+                            dedup_key="iwara:local_fallback",
+                            client=client,
                         )
                         iwara = IwaraSpider(cfg, db)
                         spider = await iwara.do_job()
@@ -414,6 +449,19 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
                         continue
                     else:
                         logger.error(f'已达到最大重试次数，但仍未成功发送足够预览图（目标：{expected_preview_count}条）')
+                        await notify_admin(
+                            "iwara:发送数量不足,任务最终失败",
+                            f"重试 {max_retries} 次后仍只发出 {successful_preview_count}/"
+                            f"{expected_preview_count} 条预览图。",
+                            context={
+                                "platform": "iwara", "stage": "send_preview",
+                                "attempt": attempt, "sent": successful_preview_count,
+                                "expected": expected_preview_count,
+                                "download_failures": len(download_failures),
+                            },
+                            dedup_key="iwara:preview_shortfall",
+                            client=client,
+                        )
                         return False
 
                 # 本轮成功，发送 Top 5
@@ -427,6 +475,23 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
 
             except Exception as batch_error:
                 logger.error(f"第 {attempt} 次尝试中的批处理出错: {batch_error}", exc_info=True)
+
+                await notify_admin(
+                    f"iwara:发送阶段出错(第 {attempt}/{max_retries} 次)",
+                    "下载/上传/发帖批处理抛异常。已发出的视频消息与数据库记录会保留,"
+                    "预览图消息已回滚。若是 FloodWait/账号限制类错误请优先处理。",
+                    exc=batch_error,
+                    context={
+                        "platform": "iwara",
+                        "stage": "send_batch",
+                        "attempt": attempt,
+                        "video_uploaded": len([v for v in video_ch_ids if v and v != 0]),
+                        "preview_sent": len([m for m in preview_ch_ids if m]),
+                        "download_failures": len(download_failures),
+                    },
+                    dedup_key=f"iwara:send_batch_fail:{type(batch_error).__name__}",
+                    client=client,
+                )
 
                 # 批处理异常时，删除预览图频道的消息，保留视频频道的消息和数据库记录
                 logger.warning(f"处理异常，已发送的 {len([ch_id for ch_id in video_ch_ids if ch_id != 0])} 条视频消息和数据库记录将保留")
@@ -453,6 +518,14 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
                 continue
             else:
                 logger.error('已达到最大重试次数，任务失败')
+                await notify_admin(
+                    "iwara:任务重试耗尽,最终失败",
+                    f"每次尝试都抛出未预期异常,已重试 {max_retries} 次,任务放弃。",
+                    exc=e,
+                    context={"platform": "iwara", "stage": "task", "attempt": attempt},
+                    dedup_key="iwara:task_exhausted",
+                    client=client,
+                )
                 return False
 
     return False

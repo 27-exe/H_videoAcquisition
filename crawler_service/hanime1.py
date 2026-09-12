@@ -29,6 +29,8 @@ from lxml import html as lxml_html
 from .browser import open_browser, open_page
 # 2026-09-12: 浏览器无关的 HTTP 路径(服务端渲染 HTML + curl_cffi)。
 # 浏览器仅作 fallback,见 hanime1_http.py 顶部说明与 L2 handoff 文档。
+# 2026-09-12: 失败告警。HK 不持有 TG 凭据,只打包结构化诊断塞进响应,由 US bot 发送。
+from utils.notify import build_alert as _build_alert
 from .hanime1_http import (
     HanimeHTTPBlocked,
     concurrency_limit,
@@ -279,6 +281,9 @@ async def crawl_hanime1(cfg: dict) -> dict:
 
     started = datetime.now()
     items: list[dict[str, Any]] = []
+    alerts: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    fallback_used = False
 
     logger.info(f"hanime1 start: url={list_url} limit={limit} skip_ids={len(skip_ids)}")
     try:
@@ -295,14 +300,33 @@ async def crawl_hanime1(cfg: dict) -> dict:
                 logger.info(f"hanime1: list via HTTP ok, n={len(pairs)}")
             except HanimeHTTPBlocked as e:
                 logger.warning(f"hanime1: HTTP list blocked ({e}) → browser fallback")
+                fallback_used = True
+                alerts.append(_build_alert(
+                    "hanime1:HTTP 列表被拦,已回落浏览器路径",
+                    "curl_cffi(impersonate=firefox135)拿列表页被拦(403/挑战页)。"
+                    "hanime1 无 cookie,被拦通常意味着指纹策略收紧或 IP 信誉变化。"
+                    "本次已回落浏览器路径,功能不受影响但会明显变慢。",
+                    {"platform": "hanime1", "stage": "list"},
+                    e, "hanime1:http_blocked:list",
+                ))
                 http_ok = False
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"hanime1: HTTP list error ({e!r}) → browser fallback")
+                warnings.append(f"http_list_error:{type(e).__name__}")
                 http_ok = False
 
         if not http_ok:
             pairs, err = await _fetch_list_browser(list_url)
             if err is not None:
+                err["warnings"] = warnings
+                err["fallback_used"] = True
+                err["alerts"] = alerts + [_build_alert(
+                    "hanime1:列表页彻底失败(HTTP + 浏览器双路均挂)",
+                    "HTTP 路径被拦后已回落浏览器路径;浏览器路径也未能取到列表页。"
+                    "本次爬取无数据返回。",
+                    {"platform": "hanime1", "stage": "list", "path": "browser"},
+                    None, "hanime1:list_page_failed",
+                )]
                 err["elapsed_ms"] = int((datetime.now() - started).total_seconds() * 1000)
                 return err
 
@@ -327,7 +351,8 @@ async def crawl_hanime1(cfg: dict) -> dict:
             logger.info("hanime1 list page parsed empty, returning ok=true with empty items")
             return {
                 "ok": True, "source": "hanime1", "crawled_at": _now_iso(),
-                "items": [], "warnings": [],
+                "items": [], "warnings": warnings + ["list_parsed_empty"],
+                "alerts": alerts, "fallback_used": fallback_used,
                 "elapsed_ms": int((datetime.now() - started).total_seconds() * 1000),
             }
 
@@ -352,6 +377,13 @@ async def crawl_hanime1(cfg: dict) -> dict:
                 logger.warning(
                     f"hanime1: HTTP dl blocked ({e}) → browser fallback for all items"
                 )
+                fallback_used = True
+                alerts.append(_build_alert(
+                    "hanime1:HTTP 详情阶段被拦,已回落浏览器路径",
+                    "列表页 HTTP 正常但批量 /download 页被拦,已整批回落浏览器路径重做。",
+                    {"platform": "hanime1", "stage": "api"},
+                    e, "hanime1:http_blocked:api",
+                ))
                 http_ok = False
                 for it in items:
                     it["download_url"] = ""
@@ -377,7 +409,9 @@ async def crawl_hanime1(cfg: dict) -> dict:
             "source": "hanime1",
             "crawled_at": _now_iso(),
             "items": items,
-            "warnings": [],
+            "warnings": warnings,
+            "alerts": alerts,
+            "fallback_used": fallback_used,
             "elapsed_ms": int((datetime.now() - started).total_seconds() * 1000),
         }
 
@@ -388,5 +422,13 @@ async def crawl_hanime1(cfg: dict) -> dict:
             "source": "hanime1",
             "error": "internal_error",
             "message": str(e),
+            "warnings": warnings,
+            "alerts": alerts + [_build_alert(
+                "hanime1:爬取抛出未捕获异常",
+                "hanime1 爬取过程中抛出未捕获异常,本次无数据返回。堆栈见下。",
+                {"platform": "hanime1"},
+                e, "hanime1:internal_error",
+            )],
+            "fallback_used": fallback_used,
             "elapsed_ms": int((datetime.now() - started).total_seconds() * 1000),
         }

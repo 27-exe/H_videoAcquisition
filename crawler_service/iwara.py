@@ -21,11 +21,16 @@ import html as _html
 import logging
 import os
 import re
+import traceback
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import aiohttp
 from lxml import html as lxml_html
+
+# 2026-09-12: 失败告警。HK **故意不持有 TG 凭据** —— 这里只做「把诊断打包成结构化
+# 字段(含堆栈)塞进 HTTP 响应」,真正的发送由 US bot(已握有活 client)完成。
+from utils.notify import build_alert as _build_alert, format_stack
 
 from .browser import open_browser, open_page
 from .fuck_cf import fuck_cf, preprocess_iwara_list
@@ -173,6 +178,73 @@ def _load_storage_state(path: str):
     return None
 
 
+# ── 2026-09-12: 失败诊断打包 + cookie re-mint ───────────────────────────
+# 登录页元素与单机版 spiders/iwara/crawler.py 调用 login() 时完全一致。
+IWARA_LOGIN_URL = "https://www.iwara.tv/login"
+IWARA_USERNAME_SELECTOR = 'input[name="email"]'
+IWARA_PASSWORD_SELECTOR = 'input[name="password"]'
+
+
+async def _remint_iwara_state(
+    what: str,
+    proxy_str=None,
+    pro_name=None,
+    pro_word=None,
+) -> "tuple[bool, Any]":
+    """Re-mint config/auth/iwara_auth.json by logging in with camoufox.
+
+    Reuses the **same browser environment** as fuck_cf()/preprocess_iwara_list():
+    login() takes the same browser semaphore, the same ADDON_PATH and the same
+    geoip / disable_coop / main_world_eval / addons config — so this costs one
+    extra browser start, not a second stack to keep in sync.
+
+    Credentials come from IWARA_USERNAME / IWARA_PASSWORD
+    (/etc/videoAcq/crawler.env on HK). Returns (ok, new_storage_state).
+    """
+    user = (os.environ.get("IWARA_USERNAME") or "").strip()
+    pwd = (os.environ.get("IWARA_PASSWORD") or "").strip()
+    if not user or not pwd:
+        logger.warning(
+            f"iwara remint ({what}): 未配置 IWARA_USERNAME/IWARA_PASSWORD,无法重新 mint"
+        )
+        return False, None
+
+    logger.info(f"iwara remint ({what}): 用 camoufox 重新登录以 mint cf_clearance")
+    try:
+        from .fuck_cf import login
+
+        path = await login(
+            IWARA_LOGIN_URL,
+            user,
+            pwd,
+            IWARA_USERNAME_SELECTOR,
+            IWARA_PASSWORD_SELECTOR,
+            proxy_str=proxy_str,
+            pro_name=pro_name,
+            pro_word=pro_word,
+            save_state_path=_DEFAULT_STATE_PATH,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"iwara remint ({what}) 抛异常: {e!r}")
+        logger.debug(traceback.format_exc())
+        return False, None
+
+    if not path:
+        logger.warning(
+            f"iwara remint ({what}): login() 失败(返回 None);"
+            f"失败截图见 error_shot/login_fail_*.png"
+        )
+        return False, None
+
+    state = _load_storage_state(_DEFAULT_STATE_PATH)
+    if not state:
+        logger.warning(f"iwara remint ({what}): 写出的 state 文件无法解析")
+        return False, None
+
+    logger.info(f"iwara remint ({what}): 成功,新 storage_state 已加载")
+    return True, state
+
+
 def _load_proxy_from_cfg(cfg: dict):
     """Resolve proxy settings from cfg (iwara.yaml on US bot side).
 
@@ -222,22 +294,64 @@ async def crawl_iwara(cfg: dict) -> dict:
     # cf_clearance is missing/expired, or iwara changes its API shape.
     http_ok = http_mode_enabled()
     list_rows: list[tuple[str, str]] = []  # (title, source_url)
+    # 失败诊断(2026-09-12):HK 不持有 TG 凭据,只把结构化告警塞进响应,由 US bot 发送。
+    alerts: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    remint_used = False
+    fallback_used = False
+
+    async def _list_via_http(state):
+        async with http_new_session(state) as hs:
+            return await http_fetch_list(hs, keywords, page_num)
 
     if http_ok:
         try:
-            async with http_new_session(storage_state) as hs:
-                got = await http_fetch_list(hs, keywords, page_num)
+            got = await _list_via_http(storage_state)
             if got:
                 list_rows = [(r["title"], r["source_url"]) for r in got]
                 logger.info(f"iwara: list via HTTP API ok, n={len(list_rows)}")
             else:
                 logger.warning("iwara: HTTP list returned 0 items → browser fallback")
+                warnings.append("http_list_empty")
                 http_ok = False
         except IwaraHTTPBlocked as e:
-            logger.warning(f"iwara: HTTP list blocked ({e}) → browser fallback")
-            http_ok = False
+            # cf_clearance 很可能过期 → 先用同一套 camoufox 环境重新 mint 再试一次
+            logger.warning(f"iwara: HTTP list blocked ({e}) → 尝试重新 mint cf_clearance")
+            ok, new_state = await _remint_iwara_state("list", proxy_url, pro_name, pro_word)
+            if ok:
+                remint_used = True
+                storage_state = new_state
+                try:
+                    got = await _list_via_http(storage_state)
+                    list_rows = [(r["title"], r["source_url"]) for r in got]
+                    logger.info(f"iwara: re-mint 后 list ok, n={len(list_rows)}")
+                except Exception as e2:  # noqa: BLE001
+                    logger.warning(f"iwara: re-mint 后 list 仍失败 ({e2!r}) → 浏览器兜底")
+                    http_ok = False
+                    fallback_used = True
+                    alerts.append(_build_alert(
+                        "iwara:重新 mint cookie 后仍被 CF 拦截",
+                        "HTTP 列表路径在「原 cookie」与「新 mint 的 cookie」两次尝试后均被拦截,"
+                        "已回落浏览器路径(慢但可用)。",
+                        e2,
+                        {"platform": "iwara", "stage": "list", "remint": "ok_but_still_blocked"},
+                        "iwara:remint_then_blocked:list",
+                    ))
+            else:
+                http_ok = False
+                fallback_used = True
+                alerts.append(_build_alert(
+                    "iwara:cf_clearance 失效,且重新 mint 失败",
+                    "HTTP 列表路径被 CF 拦截,用 camoufox 重新登录 mint 新 cookie 也失败,"
+                    "已回落浏览器路径。常见原因:未配置 IWARA_USERNAME/IWARA_PASSWORD、"
+                    "登录页 selector 变更(iwara 改版)、账号被要求二次验证。",
+                    e,
+                    {"platform": "iwara", "stage": "list", "remint": "failed"},
+                    "iwara:remint_failed:list",
+                ))
         except Exception as e:  # noqa: BLE001 — never fail the crawl on HTTP issues
             logger.warning(f"iwara: HTTP list error ({e!r}) → browser fallback")
+            warnings.append(f"http_list_error:{type(e).__name__}")
             http_ok = False
 
     if not http_ok:
@@ -256,6 +370,17 @@ async def crawl_iwara(cfg: dict) -> dict:
                 "source": "iwara",
                 "error": "list_page_failed",
                 "message": "preprocess_iwara_list returned empty after retries",
+                "warnings": warnings,
+                "alerts": alerts + [_build_alert(
+                    "iwara:列表页彻底失败(HTTP + 浏览器双路均挂)",
+                    "HTTP 路径被拦截/失败后已回落浏览器路径;浏览器路径 preprocess_iwara_list "
+                    "重试 5 次仍返回空列表。本次爬取无数据返回。",
+                    None,
+                    {"platform": "iwara", "stage": "list", "path": "browser", "remint_used": remint_used},
+                    "iwara:list_page_failed",
+                )],
+                "fallback_used": True,
+                "remint_used": remint_used,
                 "elapsed_ms": int((datetime.now() - started).total_seconds() * 1000),
             }
         logger.info(f"iwara: list page parsed {len(pairs)} items (browser path)")
@@ -379,9 +504,36 @@ async def crawl_iwara(cfg: dict) -> dict:
             )
         except IwaraHTTPBlocked as e:
             logger.warning(
-                f"iwara: HTTP api blocked ({e}) → browser fallback for the rest "
-                f"(ok={api_ok} fail={api_fail} so far)"
+                f"iwara: HTTP api blocked ({e}) → 处理中 "
+                f"(ok={api_ok} fail={api_fail}, remint_used={remint_used})"
             )
+            fallback_used = True
+            if not remint_used:
+                # 列表阶段没 mint 过 → 值得一试(过期 cookie 会让浏览器兜底同样难受)
+                ok2, new_state = await _remint_iwara_state("api", proxy_url, pro_name, pro_word)
+                if ok2:
+                    remint_used = True
+                    storage_state = new_state
+                    warnings.append("http_api_blocked_reminted")
+                    logger.info("iwara: api 阶段已重新 mint,浏览器兜底将使用新 cookie")
+                else:
+                    alerts.append(_build_alert(
+                        "iwara:HTTP 详情阶段被 CF 拦截,且重新 mint 失败",
+                        "列表阶段 HTTP 正常,但批量详情请求被 CF 拦截;尝试重新 mint cookie 失败。"
+                        "将回落浏览器路径。",
+                        e,
+                        {"platform": "iwara", "stage": "api", "remint": "failed"},
+                        "iwara:remint_failed:api",
+                    ))
+            else:
+                alerts.append(_build_alert(
+                    "iwara:重新 mint 后,HTTP 详情阶段仍被 CF 拦截",
+                    "本次已重新 mint 过 cookie(列表阶段),批量详情请求仍被拦截。"
+                    "大概率不是 cookie 过期问题(可能是 IP 信誉/限流),已回落浏览器路径。",
+                    e,
+                    {"platform": "iwara", "stage": "api", "remint": "already_used"},
+                    "iwara:api_blocked_after_remint",
+                ))
             http_ok = False
         except Exception as e:  # noqa: BLE001 — never fail the whole crawl on HTTP issues
             logger.warning(f"iwara: HTTP api error ({e!r}) → browser fallback")
@@ -514,7 +666,11 @@ async def crawl_iwara(cfg: dict) -> dict:
         "source": "iwara",
         "crawled_at": _now_iso(),
         "items": items,
-        "warnings": [],
+        "warnings": warnings,
+        # 结构化告警(含堆栈),由 US bot 转发到 admin 的 Telegram。
+        "alerts": alerts,
+        "fallback_used": fallback_used,
+        "remint_used": remint_used,
         "elapsed_ms": int((datetime.now() - started).total_seconds() * 1000),
     }
 
