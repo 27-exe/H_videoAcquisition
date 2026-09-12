@@ -333,9 +333,9 @@ async def crawl_iwara(cfg: dict) -> dict:
                         "iwara:重新 mint cookie 后仍被 CF 拦截",
                         "HTTP 列表路径在「原 cookie」与「新 mint 的 cookie」两次尝试后均被拦截,"
                         "已回落浏览器路径(慢但可用)。",
-                        e2,
-                        {"platform": "iwara", "stage": "list", "remint": "ok_but_still_blocked"},
-                        "iwara:remint_then_blocked:list",
+                        exc=e2,
+                        context={"platform": "iwara", "stage": "list", "remint": "ok_but_still_blocked"},
+                        dedup_key="iwara:remint_then_blocked:list",
                     ))
             else:
                 http_ok = False
@@ -345,9 +345,9 @@ async def crawl_iwara(cfg: dict) -> dict:
                     "HTTP 列表路径被 CF 拦截,用 camoufox 重新登录 mint 新 cookie 也失败,"
                     "已回落浏览器路径。常见原因:未配置 IWARA_USERNAME/IWARA_PASSWORD、"
                     "登录页 selector 变更(iwara 改版)、账号被要求二次验证。",
-                    e,
-                    {"platform": "iwara", "stage": "list", "remint": "failed"},
-                    "iwara:remint_failed:list",
+                    exc=e,
+                    context={"platform": "iwara", "stage": "list", "remint": "failed"},
+                    dedup_key="iwara:remint_failed:list",
                 ))
         except Exception as e:  # noqa: BLE001 — never fail the crawl on HTTP issues
             logger.warning(f"iwara: HTTP list error ({e!r}) → browser fallback")
@@ -375,9 +375,9 @@ async def crawl_iwara(cfg: dict) -> dict:
                     "iwara:列表页彻底失败(HTTP + 浏览器双路均挂)",
                     "HTTP 路径被拦截/失败后已回落浏览器路径;浏览器路径 preprocess_iwara_list "
                     "重试 5 次仍返回空列表。本次爬取无数据返回。",
-                    None,
-                    {"platform": "iwara", "stage": "list", "path": "browser", "remint_used": remint_used},
-                    "iwara:list_page_failed",
+                    exc=None,
+                    context={"platform": "iwara", "stage": "list", "path": "browser", "remint_used": remint_used},
+                    dedup_key="iwara:list_page_failed",
                 )],
                 "fallback_used": True,
                 "remint_used": remint_used,
@@ -521,18 +521,18 @@ async def crawl_iwara(cfg: dict) -> dict:
                         "iwara:HTTP 详情阶段被 CF 拦截,且重新 mint 失败",
                         "列表阶段 HTTP 正常,但批量详情请求被 CF 拦截;尝试重新 mint cookie 失败。"
                         "将回落浏览器路径。",
-                        e,
-                        {"platform": "iwara", "stage": "api", "remint": "failed"},
-                        "iwara:remint_failed:api",
+                        exc=e,
+                        context={"platform": "iwara", "stage": "api", "remint": "failed"},
+                        dedup_key="iwara:remint_failed:api",
                     ))
             else:
                 alerts.append(_build_alert(
                     "iwara:重新 mint 后,HTTP 详情阶段仍被 CF 拦截",
                     "本次已重新 mint 过 cookie(列表阶段),批量详情请求仍被拦截。"
                     "大概率不是 cookie 过期问题(可能是 IP 信誉/限流),已回落浏览器路径。",
-                    e,
-                    {"platform": "iwara", "stage": "api", "remint": "already_used"},
-                    "iwara:api_blocked_after_remint",
+                    exc=e,
+                    context={"platform": "iwara", "stage": "api", "remint": "already_used"},
+                    dedup_key="iwara:api_blocked_after_remint",
                 ))
             http_ok = False
         except Exception as e:  # noqa: BLE001 — never fail the whole crawl on HTTP issues

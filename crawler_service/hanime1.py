@@ -306,8 +306,8 @@ async def crawl_hanime1(cfg: dict) -> dict:
                     "curl_cffi(impersonate=firefox135)拿列表页被拦(403/挑战页)。"
                     "hanime1 无 cookie,被拦通常意味着指纹策略收紧或 IP 信誉变化。"
                     "本次已回落浏览器路径,功能不受影响但会明显变慢。",
-                    {"platform": "hanime1", "stage": "list"},
-                    e, "hanime1:http_blocked:list",
+                    context={"platform": "hanime1", "stage": "list"},
+                    exc=e, dedup_key="hanime1:http_blocked:list",
                 ))
                 http_ok = False
             except Exception as e:  # noqa: BLE001
@@ -324,8 +324,8 @@ async def crawl_hanime1(cfg: dict) -> dict:
                     "hanime1:列表页彻底失败(HTTP + 浏览器双路均挂)",
                     "HTTP 路径被拦后已回落浏览器路径;浏览器路径也未能取到列表页。"
                     "本次爬取无数据返回。",
-                    {"platform": "hanime1", "stage": "list", "path": "browser"},
-                    None, "hanime1:list_page_failed",
+                    context={"platform": "hanime1", "stage": "list", "path": "browser"},
+                    exc=None, dedup_key="hanime1:list_page_failed",
                 )]
                 err["elapsed_ms"] = int((datetime.now() - started).total_seconds() * 1000)
                 return err
@@ -381,8 +381,8 @@ async def crawl_hanime1(cfg: dict) -> dict:
                 alerts.append(_build_alert(
                     "hanime1:HTTP 详情阶段被拦,已回落浏览器路径",
                     "列表页 HTTP 正常但批量 /download 页被拦,已整批回落浏览器路径重做。",
-                    {"platform": "hanime1", "stage": "api"},
-                    e, "hanime1:http_blocked:api",
+                    context={"platform": "hanime1", "stage": "api"},
+                    exc=e, dedup_key="hanime1:http_blocked:api",
                 ))
                 http_ok = False
                 for it in items:
@@ -426,8 +426,8 @@ async def crawl_hanime1(cfg: dict) -> dict:
             "alerts": alerts + [_build_alert(
                 "hanime1:爬取抛出未捕获异常",
                 "hanime1 爬取过程中抛出未捕获异常,本次无数据返回。堆栈见下。",
-                {"platform": "hanime1"},
-                e, "hanime1:internal_error",
+                context={"platform": "hanime1"},
+                exc=e, dedup_key="hanime1:internal_error",
             )],
             "fallback_used": fallback_used,
             "elapsed_ms": int((datetime.now() - started).total_seconds() * 1000),
