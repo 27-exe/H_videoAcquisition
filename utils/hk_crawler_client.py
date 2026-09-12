@@ -106,7 +106,7 @@ def fetch_via_hk_crawler(src: str, body: dict[str, Any] | None = None) -> list[d
     timeout_str = os.environ.get("CRAWLER_TIMEOUT_SEC")
     try:
         timeout = int(timeout_str) if timeout_str else DEFAULT_TIMEOUT_SEC
-        if timeout <= 0 or timeout > 600:  # \u8b66\u707e\u4e0a\u9650\uff1a10 \u5206\u949f
+        if timeout <= 0 or timeout > 1800:  # 警灾上限：30 分钟(2026-09-12: 600→1800)
             logger.warning(f"CRAWLER_TIMEOUT_SEC={timeout} out of range, using default")
             timeout = DEFAULT_TIMEOUT_SEC
     except (TypeError, ValueError):

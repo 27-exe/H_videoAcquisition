@@ -62,7 +62,11 @@ async def _fetch_hanime1_via_hk(
     last_err = None
     for attempt in range(1, hk_max_retries + 1):
         try:
-            items = fetch_via_hk_crawler(
+            # 2026-09-12: 同 iwara —— 阻塞的同步调用必须丢线程池,否则冻住 event loop
+            # 让 watchdog 收不到心跳(hanime1 目前 3.8-8.9min < 10min 侥幸未触发,
+            # 但一旦超过 WatchdogSec 会同样被杀)。见 spiders/iwara/tasks.py 同处注释。
+            items = await asyncio.to_thread(
+                fetch_via_hk_crawler,
                 "hanime1",
                 {
                     "page": int(cfg.get("page", 1)),

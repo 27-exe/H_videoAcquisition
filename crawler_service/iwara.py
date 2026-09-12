@@ -267,30 +267,48 @@ async def crawl_iwara(cfg: dict) -> dict:
         f"(skipped {len(items) - len(api_needed)} via skip_ids)"
     )
 
-    # Batch 5 URLs at a time, same as the original spider's parse() loop.
-    api_batch_size = 5
+    # Batch size / 并发 / 批次间隔改为 env 可调(2026-09-12 加速改造)。
+    # 默认值与改造前完全一致(5 / 1 / 10)以保证可回滚:
+    #   IWARA_API_BATCH_SIZE   每批 URL 数(每批 = 1 次 fuck_cf = 1 次浏览器冷启动)
+    #   IWARA_API_CONCURRENCY  同时进行的批次数(实际仍受 browser 端 semaphore 约束)
+    #   IWARA_API_BATCH_SLEEP  批次间礼貌间隔秒数(仅串行模式生效)
+    api_batch_size = max(1, int(os.environ.get("IWARA_API_BATCH_SIZE", "5")))
+    api_concurrency = max(1, int(os.environ.get("IWARA_API_CONCURRENCY", "1")))
+    api_batch_sleep = float(os.environ.get("IWARA_API_BATCH_SLEEP", "10"))
+
     api_ok = 0
     api_fail = 0
     api_skip = len(items) - len(api_needed)
 
-    for batch_start in range(0, max(len(api_needed), 1), api_batch_size):
-        batch = api_needed[batch_start:batch_start + api_batch_size]
-        if not batch:
-            continue
-        urls = [f"{IWARA_API}/{vid}" for _, vid in batch]
-        logger.info(f"iwara api batch [{batch_start}-{batch_start + len(batch) - 1}] ids={[v for _, v in batch]}")
+    batches = [
+        api_needed[i:i + api_batch_size]
+        for i in range(0, len(api_needed), api_batch_size)
+    ]
+    logger.info(
+        f"iwara api plan: {len(batches)} batch(es) of <= {api_batch_size}, "
+        f"concurrency={api_concurrency}, inter-batch sleep={api_batch_sleep}s"
+    )
+    _api_sem = asyncio.Semaphore(api_concurrency)
 
-        results = await fuck_cf(
-            urls,
-            proxy_str=proxy_url,
-            pro_name=pro_name,
-            pro_word=pro_word,
-            storage_state=storage_state,
-            need_resp=True,  # apiq.iwara.tv responds with JSON
-            select=None,
-            max_retries=3,
+    async def _resolve_api_batch(bi: int, batch: list[tuple[int, str]]) -> None:
+        """Run one fuck_cf() batch; fill download_url_list / items[*]._api_file."""
+        nonlocal api_ok, api_fail
+        urls: list = [f"{IWARA_API}/{vid}" for _, vid in batch]
+        logger.info(
+            f"iwara api batch #{bi} [{batch[0][0]}-{batch[-1][0]}] "
+            f"n={len(batch)} ids={[v for _, v in batch]}"
         )
-
+        async with _api_sem:
+            results = await fuck_cf(
+                urls,
+                proxy_str=proxy_url,
+                pro_name=pro_name,
+                pro_word=pro_word,
+                storage_state=storage_state,
+                need_resp=True,  # apiq.iwara.tv responds with JSON
+                select=None,
+                max_retries=3,
+            )
         for (idx, vid), content in zip(batch, results):
             if content == 0 or content == "" or isinstance(content, Exception):
                 api_fail += 1
@@ -313,9 +331,15 @@ async def crawl_iwara(cfg: dict) -> dict:
             # stash the first parsed dict for the deobf stage
             items[idx]["_api_file"] = parsed[0]
 
-        # Mirror the original 10s sleep between api batches.
-        if batch_start + api_batch_size < len(api_needed):
-            await asyncio.sleep(10)
+    if api_concurrency == 1:
+        # 串行:保留原有批次间 sleep(对 iwara 礼貌,避免风控)
+        for bi, batch in enumerate(batches):
+            await _resolve_api_batch(bi, batch)
+            if bi < len(batches) - 1:
+                await asyncio.sleep(api_batch_sleep)
+    else:
+        # 并发:批量同时投递;不再额外 sleep(并发本身已摊开请求)
+        await asyncio.gather(*[_resolve_api_batch(bi, b) for bi, b in enumerate(batches)])
 
     logger.info(
         f"iwara api done: skip={api_skip} ok={api_ok} fail={api_fail} total={len(items)}"

@@ -70,7 +70,13 @@ async def _fetch_iwara_via_hk(
     last_err = None
     for attempt in range(1, hk_max_retries + 1):
         try:
-            items = fetch_via_hk_crawler(
+            # 2026-09-12: fetch_via_hk_crawler 是同步函数 + 阻塞 requests.post。
+            # 直接调用会冻住整个 asyncio event loop 达 HK 爬取时长(iwara 18-26 分钟),
+            # 导致 main.py 的 _watchdog_loop 无法发 WATCHDOG=1
+            # → systemd WatchdogSec=600 超时 SIGKILL(每天 14:10 固定被杀)。
+            # 必须丢到线程池执行,让心跳协程继续被调度。
+            items = await asyncio.to_thread(
+                fetch_via_hk_crawler,
                 "iwara",
                 {
                     "keywords": cfg.get("keywords", "trending"),

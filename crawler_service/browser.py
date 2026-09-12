@@ -17,11 +17,11 @@ from playwright_captcha.utils.camoufox_add_init_script.add_init_script import ge
 logger = logging.getLogger(__name__)
 
 ADDON_PATH = get_addon_path()
-MAX_CONCURRENT_BROWSERS = 1  # HK-side per-process browser cap.
-# 2026-09-10: 原为 3,在 camoufox 0.5.4 / Firefox 152 下会撑爆 unit 的
-# MemoryMax=2G → cgroup OOM kill(实测 task="Web Content" anon-rss ~1.15GB、
-# file-rss ~17GB/进程)。调用方(bot)本身就是串行(14:00 iwara、16:00 hanime1),
-# 并发 1 不损失吞吐,只把内存峰值压回单浏览器量级。
+MAX_CONCURRENT_BROWSERS = max(1, int(os.environ.get("MAX_CONCURRENT_BROWSERS", "1")))
+# 2026-09-10: 原硬编码 3,在 camoufox 0.5.4 / Firefox 152 下会撑爆 unit 的
+# MemoryMax=2G → cgroup OOM kill(实测 task="Web Content" anon-rss ~1.15GB)。
+# 默认 1 = 单浏览器,内存最省;2026-09-12 改为 env 可调以便做并发加速试验
+# (配合 IWARA_API_CONCURRENCY,并同步抬高 unit 的 MemoryMax)。
 
 # Reuse addon across calls (read-only)
 _addon_abs = os.path.abspath(ADDON_PATH)
