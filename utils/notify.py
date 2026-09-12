@@ -258,8 +258,8 @@ async def forward_hk_alerts(alerts, source: str, client=None) -> None:
 
 async def notify_admin(
     title: str,
-    *,
     detail: str = "",
+    *,
     exc: Optional[BaseException] = None,
     context: Optional[dict] = None,
     component: str = "",
