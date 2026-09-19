@@ -20,7 +20,7 @@ ExecStart=/usr/bin/ssh \
   -o ServerAliveInterval=20 \
   -o ServerAliveCountMax=3 \
   -o StrictHostKeyChecking=accept-new \
-  -L 17650:127.0.0.1:8765 vps
+  -L 127.0.0.1:17650:127.0.0.1:8765 vps
 Restart=on-failure
 RestartSec=30
 
