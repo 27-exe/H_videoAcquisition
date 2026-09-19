@@ -3,9 +3,10 @@ Description=US -> HK reverse SSH tunnel for videoAcq crawler
 Documentation=https://github.com/27-exe/videoAcquisition
 After=network-online.target
 Wants=network-online.target
-# Restart rate limit (older systemd needs this in [Unit], not [Service])
-StartLimitIntervalSec=300
-StartLimitBurst=10
+# 2026-09-19: 显式无限重试 —— StartLimitIntervalSec=0 禁用速率限制。HK 宕机
+# 恢复后隧道必须自动重连;熔断会让它躺平等人工 reset-failed,成为新的静默故障源。
+# 注意:systemd 只认 [Unit] 段的 StartLimit*([Service] 段里会被 ignoring 忽略)。
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

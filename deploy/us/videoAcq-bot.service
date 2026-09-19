@@ -3,7 +3,11 @@ Description=videoAcq bot (US) - dual-VPS, async bot via HK crawler
 Documentation=https://github.com/27-exe/videoAcquisition
 After=network-online.target ssh-tunnel.service
 Wants=network-online.target
-Requires=ssh-tunnel.service
+# 2026-09-19: Requires → Wants。HK 宕机时隧道每 30s 重试一轮,Requires 的
+# stop 传播会把 bot 连带 stop+start,5 分钟凑满 10 次即触发 bot 自身熔断。
+# Wants 保留启动顺序(After 已覆盖),隧道抖动不再波及 bot;HK 不可达时
+# bot 按设计走 FALLBACK_LOCAL_BROWSER 独立降级。
+Wants=ssh-tunnel.service
 # 2026-08-24: 放宽到 10/1800s —— watchdog 兜底 Telethon 死循环时
 # 会更频繁触发 SIGKILL+restart,需要更大窗口避免熔断
 StartLimitIntervalSec=1800
