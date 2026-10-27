@@ -1,18 +1,17 @@
 import os,logging,re,asyncio
 from pipelines.telegram_send import send_source_video,send_video,send_top5,delete_messages
-from spiders.hanime1.crawler import Hanime1spider
 from pipelines.aria2_download import start_batch_download
 from pipelines.load import load_yaml
 from spiders.base_spider import CrawlResult
 from utils.pic_utils import generate_thumbnail,write_text_on_image
 from datetime import datetime, timezone, timedelta
 from pipelines.data_base import DataBase
-from utils.hk_crawler_client import (
-    fetch_via_hk_crawler, HKCrawlerError, HKUnreachable, HKCrawlFailure,
-    HKCrawlExhausted,
-)
-# 2026-09-12: 失败告警。HK 不持有 TG 凭据,它把结构化诊断(含堆栈)放进爬取响应,由这里转发。
-from utils.notify import forward_hk_alerts as _forward_hk_alerts, notify_admin
+# 2026-10-27: 单 VPS 合并 —— 抓取引擎(crawler 包)与 bot 同进程直调,
+# 不再经 HK crawler_service 的 HTTP + SSH 反向隧道。
+from crawler.hanime1 import crawl_hanime1 as _crawl_hanime1
+# 失败告警:crawler 包把结构化诊断(含堆栈)放进爬取返回值的 alerts 字段,
+# 由这里转发到 admin 的 Telegram —— 本进程已经握着一个活着的 client。
+from utils.notify import forward_crawl_alerts as _forward_crawl_alerts, notify_admin
 
 logger = logging.getLogger(__name__)
 
@@ -23,96 +22,44 @@ cover_path = os.path.join(spider_path, "cover")
 preview_path = os.path.join(spider_path, "preview")
 
 
-def _dual_mode_enabled() -> bool:
-    """True when both CRAWLER_URL and CRAWLER_BEARER_TOKEN env vars are set.
-
-    See spiders/iwara/tasks.py for the same gate. Without both env vars, bot
-    runs the original local AsyncCamoufox path only — preserving the
-    historical single-VPS behavior.
-    """
-    return bool(os.environ.get("CRAWLER_URL")) and bool(os.environ.get("CRAWLER_BEARER_TOKEN"))
-
-
-def _fallback_local_allowed() -> bool:
-    """Whether to run local AsyncCamoufox if HK crawler is unreachable.
-
-    Default True (US bot has local browser installed for legacy path).
-    Set FALLBACK_LOCAL_BROWSER=0 to disable fallback and skip the task on
-    HK failure (next cron tick retries).
-    """
-    val = os.environ.get("FALLBACK_LOCAL_BROWSER", "1")
-    return val not in ("0", "false", "False", "no")
-
-
-async def _fetch_hanime1_via_hk(
+async def _crawl_hanime1_local(
     cfg, skip_ids: list[int] | None = None,
-    hk_max_retries: int = 3, hk_retry_delay: float = 5.0,
-) -> "CrawlResult | None":
-    """Phase 2 dual-VPS entry point: ask HK crawler for hanime1 items.
+) -> CrawlResult:
+    """单 VPS 抓取入口(2026-10-27 起,HK crawler_service 已退役)。
 
-    skip_ids: list of int video_ids already in db — HK will skip these.
+    进程内调用 crawler.hanime1.crawl_hanime1,两段式路径:
+      1. HTTP(curl_cffi + 服务端渲染 HTML,无需 cookie)—— 主力,约 2 秒
+      2. 被拦 → 浏览器兜底(camoufox,慢,罕见降级态)
+    全程 async 非阻塞,不会冻住 event loop(watchdog 心跳不受影响)。
 
-    Fallback semantics mirror _fetch_iwara_via_hk:
-      - HKUnreachable  → return None immediately, caller falls back to local
-      - HKCrawlFailure → retry up to hk_max_retries times, then fall back
+    skip_ids: 已在 db 中的 video_id,抓取前过滤,避免重复解析与下载。
 
-    Returns CrawlResult whose .data is shaped like Hanime1spider.do_job(): a
-    list of (title, source_url) tuples (NOT a [name_list, source_url_list]
-    like iwara). .detail = download_urls, .extra = id list (parsed by
-    do_hanime1 via re.search on the source_url).
+    返回 CrawlResult(形状兼容原 Hanime1spider.do_job 的下游消费):
+    .data 为 (title, source_url) 元组列表;.detail 为 download_urls;
+    .extra 保持 None —— do_hanime1 自行用 re.search 从 source_url 解析 id。
+    crawler 返回 ok=False 时 success=False,由 do_hanime1 外层重试处理。
     """
-    last_err = None
-    meta: dict = {}
-    for attempt in range(1, hk_max_retries + 1):
-        try:
-            # 2026-09-12: 同 iwara —— 阻塞的同步调用必须丢线程池,否则冻住 event loop
-            # 让 watchdog 收不到心跳(hanime1 目前 3.8-8.9min < 10min 侥幸未触发,
-            # 但一旦超过 WatchdogSec 会同样被杀)。见 spiders/iwara/tasks.py 同处注释。
-            items = await asyncio.to_thread(
-                fetch_via_hk_crawler,
-                "hanime1",
-                {
-                    "page": int(cfg.get("page", 1)),
-                    "limit": int(cfg.get("limit", 30)),
-                    "sort": cfg.get("sort", "today-popular"),
-                    **({"skip_ids": skip_ids} if skip_ids is not None else {}),
-                },
-                meta,
-            )
-            await _forward_hk_alerts(meta.get("alerts"), "hanime1")
-            if meta.get("fallback_used"):
-                logger.warning("hanime1:HK 侧使用了浏览器兜底路径")
-            break  # success
-        except HKUnreachable as e:
-            logger.warning(
-                f"hk crawler hanime1 unreachable (attempt {attempt}/{hk_max_retries}): {e}; "
-                f"falling back to local browser immediately"
-            )
-            await notify_admin(
-                "hanime1:HK crawler 不可达",
-                "调用 HK crawler 在网络层失败,已立刻回落**本机浏览器**路径。"
-                "常见原因:ssh-tunnel 断开、HK crawler 服务挂了、HK 机器网络异常。",
-                exc=e,
-                context={"platform": "hanime1", "stage": "hk_call", "attempt": attempt},
-                dedup_key="hanime1:hk_unreachable",
-            )
-            return None
-        except HKCrawlFailure as e:
-            last_err = e
-            logger.warning(
-                f"hk crawler hanime1 crawl failure (attempt {attempt}/{hk_max_retries}): {e}"
-            )
-            await _forward_hk_alerts(getattr(e, "alerts", None), "hanime1")
-            if attempt < hk_max_retries:
-                logger.info(f"retrying HK hanime1 after {hk_retry_delay}s...")
-                await asyncio.sleep(hk_retry_delay)
-    else:
-        logger.warning(
-            f"hk crawler hanime1 failed after {hk_max_retries} attempts "
-            f"(last err: {last_err}); escalating to one local fallback"
-        )
-        raise HKCrawlExhausted(str(last_err))
+    crawl_cfg = dict(cfg)
+    crawl_cfg["page"] = int(cfg.get("page", 1))
+    crawl_cfg["limit"] = int(cfg.get("limit", 30))
+    if skip_ids is not None:
+        crawl_cfg["skip_ids"] = skip_ids
 
+    result = await _crawl_hanime1(crawl_cfg)
+
+    # crawler 包内的兜底诊断(回落浏览器等)。正常爬取时 alerts 为空 →
+    # 这里不发任何消息。
+    await _forward_crawl_alerts(result.get("alerts"), "hanime1")
+    if result.get("fallback_used"):
+        logger.warning("hanime1:HTTP 路径被拦,已回落浏览器兜底")
+
+    if not result.get("ok"):
+        return CrawlResult(
+            success=False,
+            error=result.get("error") or result.get("message") or "crawl_failed",
+        )
+
+    items = result.get("items") or []
     data_list = [
         (it.get("title", ""), it.get("source_url", ""))
         for it in items
@@ -120,17 +67,18 @@ async def _fetch_hanime1_via_hk(
     download_urls = [it.get("download_url", 0) for it in items]
     zero_count = sum(1 for d in download_urls if not d)
     logger.info(
-        f"_fetch_hanime1_via_hk: got {len(items)} items, "
+        f"_crawl_hanime1_local: got {len(items)} items, "
         f"{zero_count} download_url=0, "
         f"skip_ids={len(skip_ids) if skip_ids else 0}"
     )
+
     return CrawlResult(
         success=True,
         data=data_list,
         detail=download_urls,
         extra=None,
-        crawled_at=datetime.now(timezone(timedelta(hours=8))).date().isoformat(),
-        page_url="<hk-crawler>",
+        crawled_at=result.get("crawled_at") or datetime.now(timezone(timedelta(hours=8))).date().isoformat(),
+        page_url="<crawler>",
     )
 
 
@@ -149,11 +97,8 @@ async def do_hanime1(client, db: DataBase, max_retries: int = 3, retry_wait_minu
     pic_ch = cfg['pic_channel']
     vid_name = re.sub(r'^@', '', video_ch)
 
-    dual_mode = _dual_mode_enabled()
-    fallback = _fallback_local_allowed()
     logger.info(
-        f"do_hanime1: starting max_retries={max_retries} dual_mode={dual_mode} "
-        f"FALLBACK_LOCAL_BROWSER={'1' if fallback else '0'}"
+        f"do_hanime1: starting max_retries={max_retries}"
     )
 
     for attempt in range(1, max_retries + 1):
@@ -162,74 +107,31 @@ async def do_hanime1(client, db: DataBase, max_retries: int = 3, retry_wait_minu
 
             spider: CrawlResult | None = None
             error: str | None = None
-            hk_crawl_exhausted = False
 
-            if dual_mode:
-                # Pass db skip_ids to HK so it can filter out already-sent
-                # videos before making download_url page requests.
-                try:
-                    skip_ids = list(await db.get_all_hanime1_ids())
-                except Exception as e:
-                    # If db lookup fails, we can't safely skip anything.  Fall
-                    # back to local browser (which calls if_exit internally)
-                    # rather than silently re-uploading every video.
-                    logger.error(
-                        f"get_all_hanime1_ids failed: {e!r}; "
-                        f"forcing local fallback because we cannot determine skip set"
-                    )
-                    if _fallback_local_allowed():
-                        hm = Hanime1spider(cfg, db)
-                        spider = await hm.do_job()
-                    else:
-                        logger.error(
-                            "get_all_hanime1_ids failed AND FALLBACK_LOCAL_BROWSER=0; "
-                            "skipping this attempt to avoid re-uploading existing videos"
-                        )
-                        error = "db_lookup_failed"
+            # db skip_ids:抓取前过滤已发送视频,避免重复解析与下载。
+            try:
+                skip_ids = list(await db.get_all_hanime1_ids())
+            except Exception as e:
+                # 拿不到 skip 集就不能安全抓取(会把 30 个全部当新视频重下重发),
+                # 放弃本轮,交给外层重试。
+                logger.error(
+                    f"get_all_hanime1_ids failed: {e!r}; skipping this attempt "
+                    f"because we cannot determine skip set"
+                )
+                error = "db_lookup_failed"
+                if attempt < max_retries:
+                    wait_seconds = retry_wait_minutes * 60
+                    logger.info(f"将在 {retry_wait_minutes} 分钟后进行第 {attempt + 1} 次重试...")
+                    await asyncio.sleep(wait_seconds)
                     continue
-                try:
-                    spider = await _fetch_hanime1_via_hk(cfg, skip_ids=skip_ids)
-                except HKCrawlExhausted:
-                    hk_crawl_exhausted = True
-                    spider = None
-                if spider is None:
-                    if _fallback_local_allowed():
-                        logger.info(
-                            "falling back to local AsyncCamoufox for hanime1"
-                            + " (one-shot after HK exhaustion)" if hk_crawl_exhausted else
-                            "falling back to local AsyncCamoufox for hanime1"
-                        )
-                        await notify_admin(
-                            "hanime1:HK 失败,启用本机浏览器最终兜底",
-                            "HK crawler 不可用/爬取失败,正在用 US 本机 AsyncCamoufox 兜底。"
-                            "浏览器负载会压到 US 机器上。",
-                            context={
-                                "platform": "hanime1", "stage": "local_fallback",
-                                "attempt": attempt, "hk_crawl_exhausted": hk_crawl_exhausted,
-                            },
-                            dedup_key="hanime1:local_fallback",
-                            client=client,
-                        )
-                        hm = Hanime1spider(cfg, db)
-                        spider = await hm.do_job()
-                    else:
-                        logger.error(
-                            "HK crawler unavailable and FALLBACK_LOCAL_BROWSER=0; "
-                            "skipping this attempt"
-                        )
-                        error = "hk_crawler_unavailable_no_fallback"
-            else:
-                hm = Hanime1spider(cfg, db)
-                spider = await hm.do_job()
+                else:
+                    logger.error('已达到最大重试次数，任务失败')
+                    return False
+
+            spider = await _crawl_hanime1_local(cfg, skip_ids=skip_ids)
 
             if spider is None:
-                if hk_crawl_exhausted:
-                    logger.error("local one-shot fallback returned None after HK exhaustion; task failed")
-                    return False
-                if dual_mode and error is None:
-                    error = "hk_crawler_returned_none"
-                if error is None:
-                    error = "spider_returned_none"
+                error = "spider_returned_none"
                 logger.warning(f'第 {attempt} 次：未能正确爬取，原因: {error}')
                 if attempt < max_retries:
                     wait_seconds = retry_wait_minutes * 60
@@ -242,9 +144,6 @@ async def do_hanime1(client, db: DataBase, max_retries: int = 3, retry_wait_minu
 
             if not spider.success:
                 logger.warning(f'第 {attempt} 次：未能正确爬取，原因: {spider.error}')
-                if hk_crawl_exhausted:
-                    logger.error("local one-shot fallback failed after HK exhaustion; task failed")
-                    return False
                 if attempt < max_retries:
                     wait_seconds = retry_wait_minutes * 60
                     logger.info(f"将在 {retry_wait_minutes} 分钟后进行第 {attempt + 1} 次重试...")

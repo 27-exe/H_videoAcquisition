@@ -1,4 +1,4 @@
-"""hanime1 crawler (HK side). Per plan §1: zero persistence, no DB.
+"""hanime1 crawler (in-process, single-VPS). Zero persistence, no DB.
 
 Download URL resolution:
   After building the items list, this crawler fetches
@@ -29,7 +29,7 @@ from lxml import html as lxml_html
 from .browser import open_browser, open_page
 # 2026-09-12: 浏览器无关的 HTTP 路径(服务端渲染 HTML + curl_cffi)。
 # 浏览器仅作 fallback,见 hanime1_http.py 顶部说明与 L2 handoff 文档。
-# 2026-09-12: 失败告警。HK 不持有 TG 凭据,只打包结构化诊断塞进响应,由 US bot 发送。
+# 2026-09-12: 失败告警。本进程不直接发 TG,结构化诊断由 spiders/hanime1/tasks.py 转发。
 from utils.notify import build_alert as _build_alert
 from .hanime1_http import (
     HanimeHTTPBlocked,
@@ -253,7 +253,7 @@ async def _resolve_downloads_http(items: list[dict], skip_ids: set[str]) -> tupl
     if blocked:
         raise HanimeHTTPBlocked(f"{len(blocked)} download pages blocked, first: {blocked[0]}")
 
-    # skip_ids keep the "0" contract (US bot reuses the existing ch_id from db)
+    # skip_ids keep the "0" contract (bot reuses the existing ch_id from db)
     for it in items:
         if it["id"] in skip_ids:
             it["download_url"] = "0"
@@ -273,7 +273,7 @@ async def crawl_hanime1(cfg: dict) -> dict:
 
     # Original single-VPS URL: `search?genre=<kw>&sort=今日排行&page=<n>`
     # The `sort` is hard-coded to "今日排行" because that is the only sort
-    # the home page uses; the US bot reads this page to get the daily ranking.
+    # the home page uses; the bot reads this page to get the daily ranking.
     list_url = (
         f"{HANIME1_BASE}/search?genre={keywords}"
         f"&sort={_TODAY_SORT}&page={page_num}"
@@ -365,7 +365,7 @@ async def crawl_hanime1(cfg: dict) -> dict:
         # ── 2) resolve download URLs ────────────────────────────────────
         # HTTP first (concurrent), then the original batched browser path for
         # anything the HTTP path could not resolve. skip_ids get a 0 in the
-        # result so the US bot reuses the existing ch_id from db.
+        # result so the bot reuses the existing ch_id from db.
         dl_ok_count = 0
         dl_skip_count = 0
         dl_fail_count = 0

@@ -5,7 +5,7 @@ live in `spiders/iwara/crawler.py:preprocess_response`.
 Kept behavior identical to the original (semaphore, per-URL retries, CF
 detection, ClickSolver fallback, exponential backoff). The only change is
 that the caller no longer needs to start_requests / login manually — that
-scaffolding lives in the HK crawler module.
+scaffolding lives in crawler/iwara.py.
 
 The state file (storage_state) is read once per call from disk. Persisting
 the file back to disk on every call is unnecessary; the caller can refresh
@@ -33,7 +33,7 @@ shot_dir = Path(os.environ.get("TMPDIR") or "/tmp") / "videoAcq_error_shot"
 shot_dir.mkdir(parents=True, exist_ok=True)
 
 
-# Use the SAME semaphore as the FastAPI app's _BROWSER_SEMAPHORE so the
+# Use the SAME semaphore as the crawl entry points' browser semaphore so the
 # total in-flight browser count is correctly bounded.  Without this we
 # had two independent semaphores: app=3, fuck_cf=2, so up to 5
 # AsyncCamoufox instances could run concurrently.
@@ -269,7 +269,7 @@ async def preprocess_iwara_list(
             )
             # Inline `make_result()` + `clean_filename()` from the original
             # utils/parse_utils.py — they are tiny pure functions and we
-            # don't want HK to depend on a US-only utils path.
+            # don't want the crawler package to depend on a utils-only path.
             processed = []
             for url, result in zip([list_url], results):
                 if url == 0 or result == 0:

@@ -1,9 +1,12 @@
 """Per-request browser context manager.
 
+本地(单 VPS)架构下由 crawler 包直接调用；camoufox 只用于 cf_clearance
+re-mint 与 HTTP 路径被拦后的兜底，不作为主力抓取路径。
+
 Wraps AsyncCamoufox with sane defaults:
 - headless=True
-- geoip=True (HK egress pretends to be HK-resident for CF filters)
-- proxy=None (HK doesn't need proxy; CF-passes via geoip alone)
+- geoip=True (egress pretends to be local-resident for CF filters)
+- proxy=None (no proxy needed; CF-passes via geoip alone)
 - each call: fresh browser instance, scoped lifetime
 """
 import logging

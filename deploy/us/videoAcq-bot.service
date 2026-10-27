@@ -1,13 +1,8 @@
 [Unit]
-Description=videoAcq bot (US) - dual-VPS, async bot via HK crawler
+Description=videoAcq bot (US) - single-VPS async bot
 Documentation=https://github.com/27-exe/videoAcquisition
-After=network-online.target ssh-tunnel.service
+After=network-online.target
 Wants=network-online.target
-# 2026-09-19: Requires → Wants。HK 宕机时隧道每 30s 重试一轮,Requires 的
-# stop 传播会把 bot 连带 stop+start,5 分钟凑满 10 次即触发 bot 自身熔断。
-# Wants 保留启动顺序(After 已覆盖),隧道抖动不再波及 bot;HK 不可达时
-# bot 按设计走 FALLBACK_LOCAL_BROWSER 独立降级。
-Wants=ssh-tunnel.service
 # 2026-08-24: 放宽到 10/1800s —— watchdog 兜底 Telethon 死循环时
 # 会更频繁触发 SIGKILL+restart,需要更大窗口避免熔断
 StartLimitIntervalSec=1800
@@ -32,9 +27,10 @@ RestartSec=30
 # 2026-08-24: WatchdogSec=600 —— main.py 每 30s 发一次 WATCHDOG=1,
 # 10 分钟无心跳 = 进程被 systemd SIGKILL+restart,防 Telethon 内部死循环
 WatchdogSec=600
-# Memory cap same as old single-VPS configuration (currently 4GB swap,
-# ~1.9GB RAM): we don't add more since async bot launches only on schedule,
-# and now it's HK camoufox that uses memory, not US.
+# 单 VPS 合并(2026-10-27)后抓取也在本机:主力是 curl_cffi HTTP 路径
+# (实测 ~116MB),浏览器只在 iwara cookie re-mint 与罕见兜底时启动
+# (~620MB-1GB 峰值)。MemoryMax 保留 2G,兜底路径叠 ffmpeg 时最吃紧,
+# 真被 cgroup OOM 再抬,并同步抬 MemorySwapMax。
 MemoryMax=2G
 MemorySwapMax=1G
 

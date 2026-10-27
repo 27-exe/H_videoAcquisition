@@ -1,13 +1,13 @@
-"""iwara crawler (HK side). Per plan §1: zero persistence, no DB.
+"""iwara crawler (in-process, single-VPS). Zero persistence, no DB.
 
 Re-implementation note: this module used to inline a slimmed-down CF-bypass
 loop that proved much weaker than the original single-VPS `fuck_cf()`.
-We now call the ported `fuck_cf()` from `crawler_service.fuck_cf` so the HK
-end matches the single-VPS production behaviour (proxy support, 60s page
+We now call the ported `fuck_cf()` from `crawler.fuck_cf` so behaviour
+matches the original single-VPS production path (proxy support, 60s page
 timeout, per-URL retry with exponential backoff, Cloudflare interstitial
 detection + ClickSolver fallback).
 
-Output contract kept: returns the same JSON shape US bot already consumes:
+Output contract kept: returns the same JSON shape the bot tasks consume:
   {
     "ok": bool,
     "source": "iwara",
@@ -28,8 +28,8 @@ from typing import Any
 import aiohttp
 from lxml import html as lxml_html
 
-# 2026-09-12: 失败告警。HK **故意不持有 TG 凭据** —— 这里只做「把诊断打包成结构化
-# 字段(含堆栈)塞进 HTTP 响应」,真正的发送由 US bot(已握有活 client)完成。
+# 2026-09-12: 失败告警。抓取进程不直接发 TG —— 只把诊断打包成结构化字段
+# (含堆栈)放进返回值的 alerts,由 spiders/iwara/tasks.py 转发给 admin。
 from utils.notify import build_alert as _build_alert, format_stack
 
 from .browser import open_browser, open_page
@@ -52,7 +52,7 @@ IWARA_API = "https://apiq.iwara.tv/video"
 IWARA_OBFUSCATION_SUFFIX = "_mSvL05GfEmeEmsEYfGCnVpEjYgTJraJN"
 
 # Path to the iwara storage_state file. We do NOT ship a real auth file in
-# the HK repo; the operator can rsync one over (or have it auto-regenerated
+# the repo; the operator can rsync one over (or have it auto-regenerated
 # via the standalone login() helper). The single-VPS path tolerated a missing
 # file, so we keep that behaviour: only pass it to fuck_cf() if present.
 _DEFAULT_STATE_PATH = os.path.join(
@@ -198,8 +198,8 @@ async def _remint_iwara_state(
     geoip / disable_coop / main_world_eval / addons config — so this costs one
     extra browser start, not a second stack to keep in sync.
 
-    Credentials come from IWARA_USERNAME / IWARA_PASSWORD
-    (/etc/videoAcq/crawler.env on HK). Returns (ok, new_storage_state).
+    Credentials come from IWARA_USERNAME / IWARA_PASSWORD env vars,
+    falling back to cfg username/password (iwara.yaml). Returns (ok, new_storage_state).
     """
     user = (os.environ.get("IWARA_USERNAME") or "").strip()
     pwd = (os.environ.get("IWARA_PASSWORD") or "").strip()
@@ -246,11 +246,10 @@ async def _remint_iwara_state(
 
 
 def _load_proxy_from_cfg(cfg: dict):
-    """Resolve proxy settings from cfg (iwara.yaml on US bot side).
+    """Resolve proxy settings from cfg (iwara.yaml).
 
     Falls back to env vars CRAWLER_PROXY_URL / CRAWLER_PROXY_NAME /
-    CRAWLER_PROXY_PASS if the cfg does not include them — that lets the HK
-    operator set the proxy independently of the US yaml.
+    CRAWLER_PROXY_PASS if the cfg does not include them.
     """
     proxy_url = cfg.get("proxy_url")
     pro_name = cfg.get("proxy_name")
@@ -269,7 +268,7 @@ def _load_proxy_from_cfg(cfg: dict):
 
 
 async def crawl_iwara(cfg: dict) -> dict:
-    """Original single-VPS iwara pipeline, ported to HK crawler service.
+    """Original single-VPS iwara pipeline, now running in-process.
 
     cfg: at least {"keywords", "page", "limit", "skip_ids", optional proxy_*}.
     """
@@ -294,7 +293,7 @@ async def crawl_iwara(cfg: dict) -> dict:
     # cf_clearance is missing/expired, or iwara changes its API shape.
     http_ok = http_mode_enabled()
     list_rows: list[tuple[str, str]] = []  # (title, source_url)
-    # 失败诊断(2026-09-12):HK 不持有 TG 凭据,只把结构化告警塞进响应,由 US bot 发送。
+    # 失败诊断(2026-09-12):本进程不直接发 TG,结构化告警由 tasks.py 转发。
     alerts: list[dict[str, Any]] = []
     warnings: list[str] = []
     remint_used = False
@@ -426,7 +425,7 @@ async def crawl_iwara(cfg: dict) -> dict:
     # Single-VPS pattern: batch 5 apiq URLs, pass each batch through
     # fuck_cf(...) so the CF bypass + per-URL retry behaviour matches.
     # skip_ids ids don't need an api call — leave download_url=0 for the
-    # US bot to look them up in its own db.
+    # bot to look them up in its own db.
     download_url_list: list[Any] = [""] * len(items)
     api_needed: list[tuple[int, str]] = [
         (i, it["id"]) for i, it in enumerate(items) if it["id"] not in skip_ids
@@ -659,9 +658,8 @@ async def crawl_iwara(cfg: dict) -> dict:
         )
     items = out_items
 
-    # Items without a valid download_url become 0 (US bot will reuse ch_id
-    # from db when 0 is hit, or skip otherwise — exactly the original
-    # behaviour).
+    # Items without a valid download_url become 0 (bot reuses ch_id from db
+    # when 0 is hit, or skips otherwise — exactly the original behaviour).
     for it in items:
         if not it.get("download_url"):
             it["download_url"] = 0
@@ -678,7 +676,7 @@ async def crawl_iwara(cfg: dict) -> dict:
         "crawled_at": _now_iso(),
         "items": items,
         "warnings": warnings,
-        # 结构化告警(含堆栈),由 US bot 转发到 admin 的 Telegram。
+        # 结构化告警(含堆栈),由 spiders/iwara/tasks.py 转发到 admin 的 Telegram。
         "alerts": alerts,
         "fallback_used": fallback_used,
         "remint_used": remint_used,

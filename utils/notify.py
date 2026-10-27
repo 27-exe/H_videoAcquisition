@@ -232,28 +232,29 @@ async def _send_standalone(creds: dict, text: str) -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-async def forward_hk_alerts(alerts, source: str, client=None) -> None:
-    """Forward HK-side structured alerts to the operator's Telegram.
+async def forward_crawl_alerts(alerts, source: str, client=None) -> None:
+    """Forward crawler-package structured alerts to the operator's Telegram.
 
-    HK owns the real traceback but deliberately holds no Telegram credentials,
-    so it serializes each diagnosis into the crawl response; sending happens on
-    the US bot, which already holds a live client. Dedup keys come from HK, so a
-    recurring fault notifies once per window instead of on every crawl.
+    2026-10-27 前这些告警由 HK crawler_service 经 HTTP 响应带回(HK 故意不持有
+    TG 凭据);单 VPS 合并后 crawler 包与 bot 同进程,alerts 直接从抓取返回值
+    取出,但「只打包、不发送」的分层保持不变 —— 发送仍统一走这里,由握着活跃
+    Telethon client 的 tasks.py 调用。Dedup keys 来自 crawler 包,复发故障
+    每个窗口只通知一次。
     """
     for a in alerts or []:
         if not isinstance(a, dict):
             continue
         try:
             await notify_admin(
-                a.get("title") or f"{source}:HK 侧告警",
+                a.get("title") or f"{source}:抓取告警",
                 detail=a.get("detail", ""),
-                context={**(a.get("context") or {}), "forwarded_from": "hk_crawler"},
+                context={**(a.get("context") or {}), "forwarded_from": "crawler"},
                 stack=a.get("stack", ""),
-                dedup_key=a.get("dedup_key") or f"{source}:hk_alert",
+                dedup_key=a.get("dedup_key") or f"{source}:crawl_alert",
                 client=client,
             )
         except Exception as e:  # noqa: BLE001 — alerting must never break a crawl
-            logger.warning(f"forward hk alert failed: {e!r}")
+            logger.warning(f"forward crawl alert failed: {e!r}")
 
 
 async def notify_admin(

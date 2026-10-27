@@ -290,13 +290,19 @@ videoAcquisition/
 ├── command/                      # Telegram 指令处理
 │   └── bot_command.py           # 命令路由与处理器
 │
-├── spiders/                      # 爬虫模块
-│   ├── base_spider.py           # 爬虫基类与数据结构
+├── crawler/                      # 抓取引擎(进程内直调,2026-10-27 单 VPS 合并)
+│   ├── iwara.py                 # iwara 编排:HTTP 优先 → remint → 浏览器兜底
+│   ├── hanime1.py               # hanime1 编排:HTTP 优先 → 浏览器兜底
+│   ├── fuck_cf.py               # Cloudflare 绕过 / ClickSolver / 登录 mint
+│   ├── browser.py               # AsyncCamoufox 上下文(仅 remint/兜底时启用)
+│   ├── iwara_http.py            # iwara HTTP 路径(curl_cffi + apiq JSON API)
+│   └── hanime1_http.py          # hanime1 HTTP 路径(curl_cffi + 服务端渲染 HTML)
+│
+├── spiders/                      # 任务流程(抓取→下载→发送)
+│   ├── base_spider.py           # 数据结构(CrawlResult)
 │   ├── hanime1/
-│   │   ├── crawler.py           # hanime1 爬虫实现
 │   │   └── tasks.py             # hanime1 完整流程任务
 │   └── iwara/
-│       ├── crawler.py           # iwara 爬虫实现
 │       └── tasks.py             # iwara 完整流程任务
 │
 ├── pipelines/                    # 处理管道
@@ -308,9 +314,12 @@ videoAcquisition/
 ├── scheduled/                    # 任务调度
 │   └── task.py                  # APScheduler 定时任务配置
 │
+├── deploy/                       # 部署文件(systemd unit / env 模板)
+│   └── us/                      # 单 VPS(US)部署
+│
 ├── utils/                        # 工具函数
 │   ├── logging_setup.py         # 日志配置
-│   ├── request_utils.py         # HTTP 请求 + 浏览器引擎
+│   ├── notify.py                # 失败告警(Telegram)
 │   ├── parse_utils.py           # HTML 解析与数据提取
 │   └── pic_utils.py             # FFmpeg 视频处理
 │
@@ -358,8 +367,8 @@ setup_logging(log_file='bot.log', level=logging.WARNING)  # 仅警告
 ### 并发数限制
 
 ```python
-# request_utils.py
-MAX_CONCURRENT_BROWSERS = 3  # 同时开启的浏览器实例数（建议 2-4）
+# crawler/browser.py
+MAX_CONCURRENT_BROWSERS = 1  # 同时开启的浏览器实例数(仅 remint/兜底,默认 1)
 
 # aria2_download.py
 "max-connection-per-server": "16"  # Aria2 单个文件最大连接数

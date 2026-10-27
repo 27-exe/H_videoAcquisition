@@ -1,19 +1,17 @@
 import os,logging,re,asyncio
 from pipelines.telegram_send import send_source_video,send_video,send_top5,delete_messages
-from spiders.iwara.crawler import  IwaraSpider
 from pipelines.aria2_download import start_batch_download
 from pipelines.load import load_yaml
 from spiders.base_spider import CrawlResult
 from utils.pic_utils import generate_thumbnail,write_text_on_image
 from datetime import datetime, timezone, timedelta
 from pipelines.data_base import DataBase
-from utils.hk_crawler_client import (
-    fetch_via_hk_crawler, HKCrawlerError, HKUnreachable, HKCrawlFailure,
-    HKCrawlExhausted,
-)
-# 2026-09-12: 失败告警。HK 侧不持有 TG 凭据,它把结构化诊断(含堆栈)放进爬取响应,
+# 2026-10-27: 单 VPS 合并 —— 抓取引擎(crawler 包)与 bot 同进程直调,
+# 不再经 HK crawler_service 的 HTTP + SSH 反向隧道。
+from crawler.iwara import crawl_iwara as _crawl_iwara
+# 失败告警:crawler 包把结构化诊断(含堆栈)放进爬取返回值的 alerts 字段,
 # 由这里转发到 admin 的 Telegram —— 本进程已经握着一个活着的 client。
-from utils.notify import forward_hk_alerts as _forward_hk_alerts, notify_admin
+from utils.notify import forward_crawl_alerts as _forward_crawl_alerts, notify_admin
 
 logger = logging.getLogger(__name__)
 
@@ -24,122 +22,52 @@ cover_path = os.path.join(spider_path, "cover")
 preview_path = os.path.join(spider_path, "preview")
 
 
-def _dual_mode_enabled() -> bool:
-    """True when both CRAWLER_URL and CRAWLER_BEARER_TOKEN env vars are set.
-
-    Operator's gate to switch from single-VPS (legacy) to dual-VPS (Phase 2)
-    without modifying code. Without both env vars, bot runs the original
-    local AsyncCamoufox path only — preserving the historical behavior.
-    """
-    return bool(os.environ.get("CRAWLER_URL")) and bool(os.environ.get("CRAWLER_BEARER_TOKEN"))
-
-
-def _fallback_local_allowed() -> bool:
-    """Whether to run local AsyncCamoufox if HK crawler is unreachable.
-
-    Default True (FALLBACK_LOCAL_BROWSER not set or "1") because US bot has
-    local browser already (legacy single-VPS path). Operators can disable
-    fallback by setting FALLBACK_LOCAL_BROWSER=0; then bot returns False on
-    HK failure and the next cron tick retries.
-    """
-    val = os.environ.get("FALLBACK_LOCAL_BROWSER", "1")
-    return val not in ("0", "false", "False", "no")
-
-
-async def _fetch_iwara_via_hk(
+async def _crawl_iwara_local(
     cfg, skip_ids: list[str] | None = None,
-    hk_max_retries: int = 3, hk_retry_delay: float = 5.0,
-) -> "CrawlResult | None":
-    """Phase 2 dual-VPS entry point: ask HK crawler for iwara items.
+) -> CrawlResult:
+    """单 VPS 抓取入口(2026-10-27 起,HK crawler_service 已退役)。
 
-    skip_ids: list of vid_ids already in db — HK will skip these to save
-    CDN requests.  None = no skip list (back-compat).
+    进程内调用 crawler.iwara.crawl_iwara,三段式路径:
+      1. HTTP(curl_cffi + apiq JSON API,复用 cf_clearance)—— 主力,约 10 秒
+      2. 被拦 → camoufox 重新 mint cookie → 重试一次
+      3. 仍被拦 → 浏览器兜底(慢,罕见降级态)
+    全程 async 非阻塞,不会冻住 event loop(watchdog 心跳不受影响)。
 
-    Fallback semantics:
-      - HKUnreachable  → return None immediately (caller falls back to local
-                         AsyncCamoufox directly; matches old single-VPS retry
-                         policy which never retried unreachable tunnels).
-      - HKCrawlFailure → retry up to hk_max_retries times (HK reachable, payload
-                         bad — could be iwara 5xx, parse failure, etc.).
-                         After hk_max_retries failures, return None so caller
-                         falls back to local browser (single attempt).
+    skip_ids: 已在 db 中的 vid_id,抓取前过滤,避免重复解析与下载。
+    None = 不过滤(仅调试用;生产路径必须传,否则 30 个全部当新视频重下)。
 
-    Returns:
-        CrawlResult on success, shape compatible with IwaraSpider.do_job().
-        None if HK unreachable or HK crawl failed hk_max_retries times —
-        caller should fall back to local IwaraSpider.do_job() once.
+    返回 CrawlResult(形状兼容原 IwaraSpider.do_job 的下游消费);
+    crawler 返回 ok=False 时 success=False,由 do_iwara 外层重试处理。
     """
-    import asyncio
-    last_err = None
-    meta: dict = {}
-    for attempt in range(1, hk_max_retries + 1):
-        try:
-            # 2026-09-12: fetch_via_hk_crawler 是同步函数 + 阻塞 requests.post。
-            # 直接调用会冻住整个 asyncio event loop 达 HK 爬取时长(iwara 18-26 分钟),
-            # 导致 main.py 的 _watchdog_loop 无法发 WATCHDOG=1
-            # → systemd WatchdogSec=600 超时 SIGKILL(每天 14:10 固定被杀)。
-            # 必须丢到线程池执行,让心跳协程继续被调度。
-            items = await asyncio.to_thread(
-                fetch_via_hk_crawler,
-                "iwara",
-                {
-                    "keywords": cfg.get("keywords", "trending"),
-                    "page": int(cfg.get("page", 1)),
-                    "limit": int(cfg.get("limit", 30)),
-                    **({"skip_ids": skip_ids} if skip_ids is not None else {}),
-                },
-                meta,
-            )
-            # HK 侧的降级/兜底诊断(回落浏览器、重新 mint 过 cookie 等)。
-            # 正常爬取时 alerts 为空 → 这里不发任何消息。
-            await _forward_hk_alerts(meta.get("alerts"), "iwara")
-            if meta.get("fallback_used") or meta.get("remint_used"):
-                logger.warning(
-                    f"iwara:HK 侧降级路径(remint_used={meta.get('remint_used')}, "
-                    f"fallback_used={meta.get('fallback_used')})"
-                )
-            break  # success
-        except HKUnreachable as e:
-            # Network-level failure: no point retrying — fall back immediately.
-            logger.warning(
-                f"hk crawler iwara unreachable (attempt {attempt}/{hk_max_retries}): {e}; "
-                f"falling back to local browser immediately"
-            )
-            await notify_admin(
-                "iwara:HK crawler 不可达",
-                "调用 HK crawler 在网络层失败,已立刻回落**本机浏览器**路径"
-                "(慢,且占用 US 本机资源)。常见原因:ssh-tunnel 断开、"
-                "HK crawler 服务挂了、HK 机器网络异常。",
-                exc=e,
-                context={"platform": "iwara", "stage": "hk_call", "attempt": attempt},
-                dedup_key="iwara:hk_unreachable",
-            )
-            return None
-        except HKCrawlFailure as e:
-            last_err = e
-            logger.warning(
-                f"hk crawler iwara crawl failure (attempt {attempt}/{hk_max_retries}): {e}"
-            )
-            # HK 可达但爬取失败 —— 把 HK 侧诊断(含堆栈)转发给 operator
-            await _forward_hk_alerts(getattr(e, "alerts", None), "iwara")
-            if attempt < hk_max_retries:
-                logger.info(
-                    f"retrying HK iwara after {hk_retry_delay}s..."
-                )
-                await asyncio.sleep(hk_retry_delay)
-    else:
-        # exhausted hk_max_retries; caller must run local browser once only.
-        logger.warning(
-            f"hk crawler iwara failed after {hk_max_retries} attempts "
-            f"(last err: {last_err}); escalating to one local fallback"
-        )
-        raise HKCrawlExhausted(str(last_err))
+    crawl_cfg = dict(cfg)
+    crawl_cfg["page"] = int(cfg.get("page", 1))
+    crawl_cfg["limit"] = int(cfg.get("limit", 30))
+    if skip_ids is not None:
+        crawl_cfg["skip_ids"] = skip_ids
 
-    # Map HK JSON items to legacy CrawlResult shape:
+    result = await _crawl_iwara(crawl_cfg)
+
+    # crawler 包内的降级/兜底诊断(重新 mint 过 cookie、回落浏览器等)。
+    # 正常爬取时 alerts 为空 → 这里不发任何消息。
+    await _forward_crawl_alerts(result.get("alerts"), "iwara")
+    if result.get("fallback_used") or result.get("remint_used"):
+        logger.warning(
+            f"iwara:降级路径(remint_used={result.get('remint_used')}, "
+            f"fallback_used={result.get('fallback_used')})"
+        )
+
+    if not result.get("ok"):
+        return CrawlResult(
+            success=False,
+            error=result.get("error") or result.get("message") or "crawl_failed",
+        )
+
+    # Map crawler items to legacy CrawlResult shape:
     #   data   = [name_list, source_url_list]
     #   detail = download_urls
     #   extra  = id_list
     # The downstream do_iwara consumer only reads these four.
+    items = result.get("items") or []
     name_list = [it.get("title", "") for it in items]
     source_url_list = [it.get("source_url", "") for it in items]
     download_urls = [it.get("download_url", 0) for it in items]
@@ -147,7 +75,7 @@ async def _fetch_iwara_via_hk(
 
     zero_count = sum(1 for d in download_urls if not d)
     logger.info(
-        f"_fetch_iwara_via_hk: got {len(items)} items, "
+        f"_crawl_iwara_local: got {len(items)} items, "
         f"{zero_count} download_url=0, "
         f"skip_ids={len(skip_ids) if skip_ids else 0}"
     )
@@ -157,8 +85,8 @@ async def _fetch_iwara_via_hk(
         data=[name_list, source_url_list],
         detail=download_urls,
         extra=id_list,
-        crawled_at=datetime.now(timezone(timedelta(hours=8))).date().isoformat(),
-        page_url="<hk-crawler>",
+        crawled_at=result.get("crawled_at") or datetime.now(timezone(timedelta(hours=8))).date().isoformat(),
+        page_url="<crawler>",
     )
 
 async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minutes: int = 10):
@@ -179,16 +107,8 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
     # 阈值 3 会让正常波动就触发整轮重试(白跑 30 分钟)。env 可调。
     max_download_failures = int(os.environ.get("IWARA_MAX_DOWNLOAD_FAILURES", "5"))
 
-    import time
-    _t0 = time.monotonic()
-    def _elapsed(tag: str) -> float:
-        return time.monotonic() - _t0
-
-    dual_mode = _dual_mode_enabled()
-    fallback = _fallback_local_allowed()
     logger.info(
-        f"do_iwara: starting max_retries={max_retries} dual_mode={dual_mode} "
-        f"FALLBACK_LOCAL_BROWSER={'1' if fallback else '0'} "
+        f"do_iwara: starting max_retries={max_retries} "
         f"max_download_failures={max_download_failures}"
     )
 
@@ -198,114 +118,31 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
 
             spider: CrawlResult | None = None
             error: str | None = None
-            hk_crawl_exhausted = False
 
-            if dual_mode:
-                # Pass db skip_ids to HK so it can filter out already-sent
-                # videos before making API + deobfuscation calls.
-                _t_db = time.monotonic()
-                logger.debug(f"[DBG do_iwara/{attempt}] entering db.get_all_iwara_ids() at +{_elapsed('db_in'):.3f}s")
-                try:
-                    skip_ids = list(await db.get_all_iwara_ids())
-                    logger.debug(
-                        f"[DBG do_iwara/{attempt}] db.get_all_iwara_ids() returned {len(skip_ids)} ids "
-                        f"in {time.monotonic()-_t_db:.3f}s at +{_elapsed('db_out'):.3f}s"
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"get_all_iwara_ids failed: {e!r}; "
-                        f"forcing local fallback because we cannot determine skip set"
-                    )
-                    if _fallback_local_allowed():
-                        iwara = IwaraSpider(cfg, db)
-                        spider = await iwara.do_job()
-                    else:
-                        logger.error(
-                            "get_all_iwara_ids failed AND FALLBACK_LOCAL_BROWSER=0; "
-                            "skipping this attempt to avoid re-uploading existing videos"
-                        )
-                        error = "db_lookup_failed"
-                    continue  # to outer attempt retry
-                _t_hk = time.monotonic()
-                logger.debug(
-                    f"[DBG do_iwara/{attempt}] entering _fetch_iwara_via_hk() at +{_elapsed('hk_in'):.3f}s; "
-                    f"CRAWLER_URL={os.environ.get('CRAWLER_URL')!r}, "
-                    f"CRAWLER_TIMEOUT_SEC={os.environ.get('CRAWLER_TIMEOUT_SEC')!r}"
+            # db skip_ids:抓取前过滤已发送视频,避免重复解析与下载。
+            try:
+                skip_ids = list(await db.get_all_iwara_ids())
+            except Exception as e:
+                # 拿不到 skip 集就不能安全抓取(会把 30 个全部当新视频重下重发),
+                # 放弃本轮,交给外层重试。
+                logger.error(
+                    f"get_all_iwara_ids failed: {e!r}; skipping this attempt "
+                    f"because we cannot determine skip set"
                 )
-                try:
-                    spider = await _fetch_iwara_via_hk(cfg, skip_ids=skip_ids)
-                    logger.debug(
-                        f"[DBG do_iwara/{attempt}] _fetch_iwara_via_hk returned {type(spider).__name__} "
-                        f"in {time.monotonic()-_t_hk:.3f}s at +{_elapsed('hk_out'):.3f}s"
-                    )
-                except HKCrawlExhausted:
-                    logger.warning(
-                        f"[DBG do_iwara/{attempt}] HKCrawlExhausted after {time.monotonic()-_t_hk:.3f}s"
-                    )
-                    # HK was reachable but failed its 3 remote attempts.  The
-                    # local fallback below is explicitly one-shot: if it also
-                    # fails, do_iwara returns False rather than re-entering the
-                    # outer 10-minute legacy retry loop.
-                    hk_crawl_exhausted = True
-                    spider = None
-                except Exception as e:
-                    logger.exception(
-                        f"[DBG do_iwara/{attempt}] UNEXPECTED exception from _fetch_iwara_via_hk "
-                        f"after {time.monotonic()-_t_hk:.3f}s at +{_elapsed('hk_unexp'):.3f}s: {e!r}"
-                    )
-                    raise
-                if spider is None:
-                    if _fallback_local_allowed():
-                        logger.info(
-                            "falling back to local AsyncCamoufox for iwara"
-                            + " (one-shot after HK exhaustion)" if hk_crawl_exhausted else
-                            "falling back to local AsyncCamoufox for iwara"
-                        )
-                        await notify_admin(
-                            "iwara:HK 失败,启用本机浏览器最终兜底",
-                            "HK crawler 不可用/爬取失败,正在用 US 本机 AsyncCamoufox 兜底。"
-                            "浏览器负载会压到 US 机器上,且明显更慢。",
-                            context={
-                                "platform": "iwara", "stage": "local_fallback",
-                                "attempt": attempt, "hk_crawl_exhausted": hk_crawl_exhausted,
-                            },
-                            dedup_key="iwara:local_fallback",
-                            client=client,
-                        )
-                        iwara = IwaraSpider(cfg, db)
-                        spider = await iwara.do_job()
-                    else:
-                        logger.error(
-                            "HK crawler unavailable and FALLBACK_LOCAL_BROWSER=0; "
-                            "skipping this attempt"
-                        )
-                        error = "hk_crawler_unavailable_no_fallback"
-                # else: HK succeeded, spider is set; do not call local.
-            else:
-                # legacy single-VPS path (no HK env vars).
-                _t_local = time.monotonic()
-                logger.debug(f"[DBG do_iwara/{attempt}] entering local IwaraSpider.do_job() at +{_elapsed('local_in'):.3f}s")
-                iwara = IwaraSpider(cfg, db)
-                spider = await iwara.do_job()
-                logger.debug(
-                    f"[DBG do_iwara/{attempt}] local IwaraSpider.do_job returned {type(spider).__name__} "
-                    f"in {time.monotonic()-_t_local:.3f}s at +{_elapsed('local_out'):.3f}s"
-                )
+                error = "db_lookup_failed"
+                if attempt < max_retries:
+                    wait_seconds = retry_wait_minutes * 60
+                    logger.info(f"将在 {retry_wait_minutes} 分钟后进行第 {attempt + 1} 次重试...")
+                    await asyncio.sleep(wait_seconds)
+                    continue
+                else:
+                    logger.error('已达到最大重试次数，任务失败')
+                    return False
 
-            logger.debug(
-                f"[DBG do_iwara/{attempt}] post-spider branch summary at +{_elapsed('post_spider'):.3f}s: "
-                f"spider={type(spider).__name__ if spider else 'None'} "
-                f"hk_crawl_exhausted={hk_crawl_exhausted} error={error!r}"
-            )
+            spider = await _crawl_iwara_local(cfg, skip_ids=skip_ids)
 
             if spider is None:
-                if hk_crawl_exhausted:
-                    logger.error("local one-shot fallback returned None after HK exhaustion; task failed")
-                    return False
-                if dual_mode and error is None:
-                    error = "hk_crawler_returned_none"
-                if error is None:
-                    error = "spider_returned_none"
+                error = "spider_returned_none"
                 logger.warning(f'第 {attempt} 次：未能正确爬取，原因: {error}')
                 if attempt < max_retries:
                     wait_seconds = retry_wait_minutes * 60
@@ -318,9 +155,6 @@ async def do_iwara(client, db: DataBase, max_retries: int = 3, retry_wait_minute
 
             if not spider.success:
                 logger.warning(f'第 {attempt} 次：未能正确爬取，原因: {spider.error}')
-                if hk_crawl_exhausted:
-                    logger.error("local one-shot fallback failed after HK exhaustion; task failed")
-                    return False
                 if attempt < max_retries:
                     wait_seconds = retry_wait_minutes * 60
                     logger.info(f"将在 {retry_wait_minutes} 分钟后进行第 {attempt + 1} 次重试...")
