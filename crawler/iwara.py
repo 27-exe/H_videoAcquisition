@@ -187,6 +187,7 @@ IWARA_PASSWORD_SELECTOR = 'input[name="password"]'
 
 async def _remint_iwara_state(
     what: str,
+    cfg: dict,
     proxy_str=None,
     pro_name=None,
     pro_word=None,
@@ -201,8 +202,12 @@ async def _remint_iwara_state(
     Credentials come from IWARA_USERNAME / IWARA_PASSWORD env vars,
     falling back to cfg username/password (iwara.yaml). Returns (ok, new_storage_state).
     """
-    user = (os.environ.get("IWARA_USERNAME") or "").strip()
-    pwd = (os.environ.get("IWARA_PASSWORD") or "").strip()
+    # 2026-10-27: env 优先,回退 cfg(iwara.yaml 的 username/password)——
+    # 单 VPS 合并后 US bot.env 默认留空,凭据唯一副本在 iwara.yaml。
+    # (此前只读 env,HK 靠 crawler.env 填值掩盖了回退缺失;US 上会让
+    # remint 静默放弃。)
+    user = (os.environ.get("IWARA_USERNAME") or cfg.get("username") or "").strip()
+    pwd = (os.environ.get("IWARA_PASSWORD") or cfg.get("password") or "").strip()
     if not user or not pwd:
         logger.warning(
             f"iwara remint ({what}): 未配置 IWARA_USERNAME/IWARA_PASSWORD,无法重新 mint"
@@ -320,7 +325,7 @@ async def crawl_iwara(cfg: dict) -> dict:
             http_err = e
             # cf_clearance 很可能过期 → 先用同一套 camoufox 环境重新 mint 再试一次
             logger.warning(f"iwara: HTTP list blocked ({e}) → 尝试重新 mint cf_clearance")
-            ok, new_state = await _remint_iwara_state("list", proxy_url, pro_name, pro_word)
+            ok, new_state = await _remint_iwara_state("list", cfg, proxy_url, pro_name, pro_word)
             if ok:
                 remint_used = True
                 storage_state = new_state
@@ -520,7 +525,7 @@ async def crawl_iwara(cfg: dict) -> dict:
             fallback_used = True
             if not remint_used:
                 # 列表阶段没 mint 过 → 值得一试(过期 cookie 会让浏览器兜底同样难受)
-                ok2, new_state = await _remint_iwara_state("api", proxy_url, pro_name, pro_word)
+                ok2, new_state = await _remint_iwara_state("api", cfg, proxy_url, pro_name, pro_word)
                 if ok2:
                     remint_used = True
                     storage_state = new_state
