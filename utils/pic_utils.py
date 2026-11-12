@@ -4,6 +4,31 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps,ImageFilter
 
 logger = logging.getLogger(__name__)
 
+# ── ffmpeg 并发闸门 ────────────────────────────────────────────
+# 一轮跑批按 5 个视频一批 gather()，每个视频抽 6 帧，等于同时起 30 个
+# ffmpeg 解码器。实测（1080p）：30 并发峰值 2283 MiB，把整机 1.9G 的
+# unit 推到 1583 MiB 峰值；限制到 3 个并发只有 197 MiB，而墙钟反而从
+# 16.4s 降到 13.8s —— 2 核上 30 个解码器本来就是在上下文切换里空转。
+# 默认 3，可用 FFMPEG_CONCURRENCY 环境变量调整。
+FFMPEG_CONCURRENCY = max(1, int(os.environ.get("FFMPEG_CONCURRENCY", "3")))
+_FFMPEG_SEM: asyncio.Semaphore | None = None
+
+
+def _ffmpeg_slots() -> asyncio.Semaphore:
+    """惰性创建信号量，保证绑定到当前事件循环。"""
+    global _FFMPEG_SEM
+    if _FFMPEG_SEM is None:
+        _FFMPEG_SEM = asyncio.Semaphore(FFMPEG_CONCURRENCY)
+        logger.info(f"pic_utils: ffmpeg 并发上限 = {FFMPEG_CONCURRENCY}")
+    return _FFMPEG_SEM
+
+
+# 抽帧引擎（selftest 实测数据见 docs/selftest-thumb-engines.md）：
+#   legacy   —— 每个视频 6 次 ffmpeg 快进抽帧，受并发闸门限流（默认）
+#   keyframe —— 每个视频 1 次 ffmpeg，跳帧解码 + tile 拼图，帧跨全片均匀取样
+THUMB_ENGINE = os.environ.get("THUMB_ENGINE", "legacy").strip().lower()
+
+
 async def run_command(cmd):
     """通用异步执行命令行函数"""
     proc = await asyncio.create_subprocess_exec(
@@ -21,11 +46,12 @@ async def generate_single_thumbnail_async(t_video_path: str, cover_path: str):
     """
     # 使用异步子进程
     cmd = [
-        'ffmpeg', '-ss', '7', '-i', t_video_path,
+        'ffmpeg', '-threads', '1', '-ss', '7', '-i', t_video_path,
         '-frames:v', '1', '-q:v', '2', '-y', cover_path
     ]
 
-    returncode, _, stderr = await run_command(cmd)
+    async with _ffmpeg_slots():
+        returncode, _, stderr = await run_command(cmd)
 
     if returncode == 0 and os.path.exists(cover_path):
         logger.debug(f"生成封面成功: {cover_path}")
@@ -47,13 +73,14 @@ async def generate_mini_thumb_async(input_path: str, output_path: str):
     vf_scale = "scale='if(gt(iw,ih),320,-1)':'if(gt(iw,ih),-1,320)'"
 
     cmd = [
-        'ffmpeg', '-y', '-i', input_path,
+        'ffmpeg', '-threads', '1', '-y', '-i', input_path,
         '-vf', vf_scale,
         '-q:v', '1',  # 质量 1 (1-31, 1为最高质量，因为图很小所以可以用高质量)
         output_path
     ]
 
-    returncode, _, stderr = await run_command(cmd)
+    async with _ffmpeg_slots():
+        returncode, _, stderr = await run_command(cmd)
 
     if returncode == 0 and os.path.exists(output_path):
         # logger.debug(f"生成320px缩略图成功: {output_path}")
@@ -91,17 +118,123 @@ async def get_video_info_async(video_path: str):
 async def extract_frame_async(video_path, timestamp, output_path):
     """异步抽取单帧"""
     cmd = [
-        'ffmpeg', '-ss', str(timestamp), '-i', video_path,
+        'ffmpeg', '-threads', '1', '-ss', str(timestamp), '-i', video_path,
         '-frames:v', '1', '-q:v', '2', '-y', output_path
     ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
-    )
-    await proc.wait()
+    async with _ffmpeg_slots():
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await proc.wait()
     return os.path.exists(output_path)
 
 
-def _draw_logic_sync(frames, thumb_path, is_vertical, info_dict):
+# ── 单进程拼图（实验性，供 selftest --thumb-mode 对比）──────────────
+def _tile_graph(n, cols, cell_w, cell_h):
+    """每路输入 scale+pad 到单元格，再用 xstack 拼成一张。"""
+    parts = []
+    for i in range(n):
+        parts.append(
+            f"[{i}:v]scale={cell_w}:{cell_h}:force_original_aspect_ratio=decrease,"
+            f"pad={cell_w}:{cell_h}:(ow-iw)/2:(oh-ih)/2:color=black[v{i}]"
+        )
+    layout = "|".join(
+        f"{(i % cols) * cell_w}_{(i // cols) * cell_h}" for i in range(n)
+    )
+    parts.append(
+        "".join(f"[v{i}]" for i in range(n))
+        + f"xstack=inputs={n}:layout={layout}:fill=black[out]"
+    )
+    return ";".join(parts)
+
+
+async def extract_tile_xstack_async(video_path, timestamps, out_path,
+                                    cols, rows, cell_w, cell_h):
+    """单进程多输入 xstack：每个时间点一次快速 seek，一个 ffmpeg 出整张拼图。
+
+    与现状（6 个 ffmpeg + PIL 粘贴）时间点完全一致，只是合并到一个进程。
+    内存上并不省 —— 6 路解码器仍然同时打开，只是少了 6 次进程创建和
+    PIL 的 6 次 open/resize/paste。
+    """
+    n = len(timestamps)
+    cmd = ['ffmpeg', '-threads', '1', '-loglevel', 'error', '-y']
+    for t in timestamps:
+        cmd += ['-ss', f'{t:.3f}', '-i', video_path]
+    cmd += [
+        '-filter_complex', _tile_graph(n, cols, cell_w, cell_h),
+        '-map', '[out]', '-frames:v', '1', '-q:v', '2', out_path,
+    ]
+    async with _ffmpeg_slots():
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, err = await proc.communicate()
+    if proc.returncode != 0 or not os.path.exists(out_path):
+        logger.warning(f"extract_tile_xstack: rc={proc.returncode} {err.decode()[:300]}")
+        return False
+    return True
+
+
+async def extract_tile_keyframe_async(video_path, out_path,
+                                      cols, rows, cell_w, cell_h, count):
+    """单进程跳帧解码拼图：-skip_frame nokey 只解关键帧，一个解码器。
+
+    取的是影片**开头**的连续 count 个关键帧，所以时间点会集中在开头
+    十几秒 —— 作为预览图质量不合格，只适合拿来量内存基线。
+    """
+    vf = (
+        f"select='eq(pict_type\\,I)',"
+        f"scale={cell_w}:{cell_h}:force_original_aspect_ratio=decrease,"
+        f"pad={cell_w}:{cell_h}:(ow-iw)/2:(oh-ih)/2:color=black,"
+        f"tile={cols}x{rows}"
+    )
+    cmd = [
+        'ffmpeg', '-threads', '1', '-loglevel', 'error', '-y',
+        '-skip_frame', 'nokey', '-i', video_path,
+        '-vf', vf, '-frames:v', '1', '-q:v', '2', out_path,
+    ]
+    async with _ffmpeg_slots():
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, err = await proc.communicate()
+    if proc.returncode != 0 or not os.path.exists(out_path):
+        logger.warning(f"extract_tile_keyframe: rc={proc.returncode} {err.decode()[:300]}")
+        return False
+    return True
+
+
+async def extract_tile_keyframe_spread_async(video_path, duration, out_path,
+                                             cols, rows, cell_w, cell_h, count):
+    """关键帧均匀取样：仍只解关键帧（1 个解码器），但用 fps 把时间轴
+    重采样成 count+1 个点，保证六个格子分布在整段影片上。
+
+    代价是要从头扫到 6/7 处（只 demux + 解关键帧，不解全帧）。
+    """
+    interval = max(duration, 1.0) / (count + 1)
+    vf = (
+        f"fps={1.0 / interval:.6f},"
+        f"scale={cell_w}:{cell_h}:force_original_aspect_ratio=decrease,"
+        f"pad={cell_w}:{cell_h}:(ow-iw)/2:(oh-ih)/2:color=black,"
+        f"tile={cols}x{rows}"
+    )
+    cmd = [
+        'ffmpeg', '-threads', '1', '-loglevel', 'error', '-y',
+        '-skip_frame', 'nokey', '-i', video_path,
+        '-vf', vf, '-frames:v', '1', '-q:v', '2', out_path,
+    ]
+    async with _ffmpeg_slots():
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, err = await proc.communicate()
+    if proc.returncode != 0 or not os.path.exists(out_path):
+        logger.warning(f"extract_tile_keyframe_spread: rc={proc.returncode} {err.decode()[:300]}")
+        return False
+    return True
+
+
+def _draw_logic_sync(frames, thumb_path, is_vertical, info_dict, pre_tiled=False):
     num = info_dict["num"]
     today = info_dict["today"]
     clean_name = info_dict["name"]
@@ -133,25 +266,34 @@ def _draw_logic_sync(frames, thumb_path, is_vertical, info_dict):
     cell_h = grid_h // rows  # 横屏现在是 720//2 = 360（完美16:9）
 
     # 3. 逐个粘贴帧 (等比例缩放并居中)
-    for idx, fp in enumerate(frames):
-        with Image.open(fp) as im:
-            orig_w, orig_h = im.size
-            # 计算在单元格内的缩放比例
-            scale = min(cell_w / orig_w, cell_h / orig_h)
-            new_w, new_h = int(orig_w * scale), int(orig_h * scale)
-            im_resized = im.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    # pre_tiled=True 时 frames 只有一张已经由 ffmpeg tile 拼好的宫格图，
+    # 直接铺满宫格区；省掉 6 次 open/resize/paste。
+    if pre_tiled:
+        with Image.open(frames[0]) as grid:
+            grid = grid.convert("RGBA")
+            if grid.size != (canvas_w, grid_h):
+                grid = grid.resize((canvas_w, grid_h), Image.Resampling.LANCZOS)
+            canvas.paste(grid, (0, 0))
+    else:
+        for idx, fp in enumerate(frames):
+            with Image.open(fp) as im:
+                orig_w, orig_h = im.size
+                # 计算在单元格内的缩放比例
+                scale = min(cell_w / orig_w, cell_h / orig_h)
+                new_w, new_h = int(orig_w * scale), int(orig_h * scale)
+                im_resized = im.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
-            # 计算在格子内的居中偏移量
-            offset_x = (cell_w - new_w) // 2
-            offset_y = (cell_h - new_h) // 2
+                # 计算在格子内的居中偏移量
+                offset_x = (cell_w - new_w) // 2
+                offset_y = (cell_h - new_h) // 2
 
-            r, c = divmod(idx, cols)
+                r, c = divmod(idx, cols)
 
-            # 计算最终粘贴坐标
-            paste_x = c * cell_w + offset_x
-            paste_y = r * cell_h + offset_y
+                # 计算最终粘贴坐标
+                paste_x = c * cell_w + offset_x
+                paste_y = r * cell_h + offset_y
 
-            canvas.paste(im_resized, (paste_x, paste_y))
+                canvas.paste(im_resized, (paste_x, paste_y))
 
     # 4. 绘制底部半透明文字遮罩
     # 创建一个透明的图层用于绘制遮罩
@@ -379,9 +521,71 @@ def write_text_on_image(image_path, top: int, date: str):
         logger.error(f"写入文字失败: {e}")
         return False
 
+async def _generate_thumbnail_keyframe(t_video_path, thumb_path, cover_path,
+                                       vid_id, num, today, clean_name):
+    """单进程 keyframe 引擎：1 次 ffmpeg 出整张宫格，再走原有的文字/封面合成。
+
+    与 legacy 的差别只在抽帧：legacy 每个时间点起一个 ffmpeg（共 6 个），
+    这里用 -skip_frame nokey 只解关键帧（1 个解码器），再用 fps 把时间轴
+    重采样成 6 个点，保证六格分布在整段影片上。
+    """
+    job_id = uuid.uuid4().hex
+    temp_dir = Path("temp") / f"thumb_{job_id}"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    thumb_id = os.path.join(thumb_path, f"{vid_id}.jpg")
+    cover_id = os.path.join(cover_path, f"{vid_id}.jpg")
+    mini_thumb_id = os.path.join(cover_path, f"{vid_id}_thumb.jpg")
+    os.makedirs(thumb_path, exist_ok=True)
+    os.makedirs(cover_path, exist_ok=True)
+
+    try:
+        duration, width, height, duration_str = await get_video_info_async(t_video_path)
+        is_vertical = width < height
+        cols = 2 if is_vertical else 3
+        rows = 2
+        count = cols * rows
+        cell_w = (1080 if is_vertical else 1920) // cols
+        cell_h = ((1920 - 384) if is_vertical else (1080 - 360)) // rows
+
+        grid_path = str(temp_dir / "grid.jpg")
+        ok = await extract_tile_keyframe_spread_async(
+            t_video_path, duration, grid_path, cols, rows, cell_w, cell_h, count
+        )
+        if not ok:
+            logger.warning(
+                f"generate_thumbnail(keyframe): 拼图失败 vid_id={vid_id} "
+                f"duration={duration}s size={width}x{height}"
+            )
+            return None
+
+        await generate_single_thumbnail_async(t_video_path, cover_id)
+        if os.path.exists(cover_id):
+            await generate_mini_thumb_async(cover_id, mini_thumb_id)
+        else:
+            logger.warning(f"generate_thumbnail(keyframe): cover 缺失 vid_id={vid_id}")
+
+        loop = asyncio.get_running_loop()
+        info_dict = {"num": num, "today": today, "name": clean_name, "str": duration_str}
+        await loop.run_in_executor(
+            None, _draw_logic_sync, [grid_path], thumb_id, is_vertical, info_dict, True
+        )
+        await loop.run_in_executor(None, stitch_cover, count, thumb_id, cover_id)
+        return True
+    except Exception as e:
+        logger.error(f"生成预览图失败(keyframe): {e}")
+        return False
+    finally:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+
+
 async def generate_thumbnail(t_video_path: str, thumb_path: str,cover_path, vid_id,num, today, clean_name):
     if t_video_path == 0:
         return 0
+    if THUMB_ENGINE == "keyframe":
+        return await _generate_thumbnail_keyframe(
+            t_video_path, thumb_path, cover_path, vid_id, num, today, clean_name
+        )
     # 1. 创建唯一的临时工作目录，彻底避免并发冲突
     job_id = uuid.uuid4().hex
     temp_dir = Path("temp") / f"thumb_{job_id}"
