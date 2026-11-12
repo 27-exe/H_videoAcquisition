@@ -101,6 +101,13 @@ async def main():
         ts.start_all()
         logger.info("scheduler auto-installed by systemd (no /update needed)")
 
+        # 2026-11-12: watchdog 心跳必须在任何长耗时跑批之前启动 ——
+        # RUN_DO_IWARA_ON_BOOT 调试路径会 await 整个 do_iwara(>10min),
+        # 若心跳任务在其后才创建,WatchdogSec=600 会直接 SIGABRT
+        # (2026-11-12 补跑 iwara 时实测踩中:跑批 9/30 被杀)。
+        asyncio.create_task(_watchdog_loop(period=30))
+        logger.info("watchdog notify started (period=30s, WatchdogSec=600)")
+
         # 2026-11-12: 启动时清扫 download/ 下的孤儿 .aria2 与烂尾 partial ——
         # 硬杀(watchdog SIGKILL/OOM/systemd stop)时 _single_download 末尾的
         # 清理不会跑,aria2 又为续传保留控制文件,日积月累拖满磁盘
@@ -128,10 +135,6 @@ async def main():
             logger.warning("RUN_DO_IWARA_ON_BOOT=1 detected, triggering do_iwara() in 5s")
             await asyncio.sleep(5)
             await do_iwara(client, db)
-
-        # 2026-08-24: 启动 watchdog 心跳,防 Telethon 内部死循环
-        asyncio.create_task(_watchdog_loop(period=30))
-        logger.info("watchdog notify started (period=30s, WatchdogSec=600)")
 
         await client.run_until_disconnected()
 
