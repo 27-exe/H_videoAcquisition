@@ -24,9 +24,16 @@ def _ffmpeg_slots() -> asyncio.Semaphore:
 
 
 # 抽帧引擎（selftest 实测数据见 docs/selftest-thumb-engines.md）：
-#   legacy   —— 每个视频 6 次 ffmpeg 快进抽帧，受并发闸门限流（默认）
-#   keyframe —— 每个视频 1 次 ffmpeg，跳帧解码 + tile 拼图，帧跨全片均匀取样
+#   legacy    —— 每个视频 6 次 ffmpeg 快进抽帧，受并发闸门限流（默认）
+#   validated —— legacy + 打分补采（亮度/清晰度/去重不合格就换时间点重抽）
+#   keyframe  —— 每个视频 1 次 ffmpeg，fps 重采样 + tile（已知会出黑格/重复格）
+#   select    —— 每个视频 1 次 ffmpeg，关键帧按自适应间隔 + tile
 THUMB_ENGINE = os.environ.get("THUMB_ENGINE", "legacy").strip().lower()
+
+# 封面引擎：
+#   legacy    —— -ss 7 取单帧（可能撞上片头黑场/淡入）
+#   thumbnail —— 1fps 抽 12 帧后用 thumbnail 滤镜挑"最典型"的一帧
+COVER_ENGINE = os.environ.get("COVER_ENGINE", "legacy").strip().lower()
 
 
 async def run_command(cmd):
@@ -40,13 +47,45 @@ async def run_command(cmd):
     return proc.returncode, stdout.decode(), stderr.decode()
 
 
-async def generate_single_thumbnail_async(t_video_path: str, cover_path: str):
+async def generate_cover_thumbnail_filter_async(t_video_path: str, cover_path: str,
+                                                duration: float | None = None,
+                                                start_frac: float = 0.08):
+    """封面：抽 10 帧后用 thumbnail 滤镜挑最"典型"的一帧。
+
+    thumbnail=N 为每批 N 帧算颜色直方图、取最接近批均值的那帧，所以片头
+    黑场、闪白这类离群帧基本不会被选中 —— 正是 `-ss 7` 单帧会翻车的地方。
+
+    成本主要在解码窗口：fps 滤镜会把窗口内的帧全部解出来再丢掉。实测
+    90s/1080p 片段上 `-ss 7 -frames:v 1` 是 0.57s，12s 窗口 1.26s，5s 窗口
+    0.81s，4s×2fps 只要 0.69s。所以窗口取 5 秒、2fps 采样（10 帧候选）。
+    起点按片长 8% 取（至少 3s、不超过一半），避开片头黑场又不至于落到片尾。
     """
-    单张7s处封面生成
-    """
-    # 使用异步子进程
+    d = float(duration or 0)
+    start = d * start_frac if d else 5.0
+    start = max(3.0, start)
+    if d:
+        start = min(start, max(d * 0.5, 3.0))
     cmd = [
-        'ffmpeg', '-threads', '1', '-ss', '7', '-i', t_video_path,
+        'ffmpeg', '-threads', '1', '-ss', f"{start:.2f}", '-t', '5', '-i', t_video_path,
+        '-vf', "fps=2,scale='min(1920,iw)':-2,thumbnail=10",
+        '-frames:v', '1', '-q:v', '2', '-y', cover_path,
+    ]
+    async with _ffmpeg_slots():
+        returncode, _, stderr = await run_command(cmd)
+    if returncode == 0 and os.path.exists(cover_path):
+        return cover_path
+    logger.warning(
+        f"cover(thumbnail) 失败 rc={returncode}，回退单帧取法: {stderr[-200:]}"
+    )
+    return await generate_single_thumbnail_async(t_video_path, cover_path)
+
+
+async def generate_single_thumbnail_async(t_video_path: str, cover_path: str,
+                                          at: float | None = None):
+    """单帧封面：默认取第 7 秒，可用 at 指定时间点。"""
+    seek = '7' if at is None else f"{max(0.0, float(at)):.2f}"
+    cmd = [
+        'ffmpeg', '-threads', '1', '-ss', seek, '-i', t_video_path,
         '-frames:v', '1', '-q:v', '2', '-y', cover_path
     ]
 
@@ -309,6 +348,179 @@ async def extract_tile_keyframe_spread_async(video_path, duration, out_path,
         logger.warning(f"extract_tile_keyframe_spread: rc={proc.returncode} {err.decode()[:300]}")
         return False
     return True
+
+
+async def _make_cover(video_path: str, cover_path: str, duration: float | None = None):
+    """生成封面并校验：整段都黑/过曝就换位置重试。
+
+    thumbnail 滤镜只保证"批内最典型"，如果窗口整段是黑场它照样返回黑帧
+    （实测 40s 片子前 15s 全黑、窗口 3.2–8.2s，两种引擎都拿到亮度 0.0）。
+    所以封面也要打分，不合格就按 30%/50%/75% 换点重来。
+    """
+    d = float(duration or 0)
+    fracs = [0.08, 0.30, 0.50, 0.75] if d else [None]
+    loop = asyncio.get_running_loop()
+    for i, frac in enumerate(fracs):
+        at = d * frac if (d and frac is not None) else None
+        if COVER_ENGINE == "thumbnail":
+            await generate_cover_thumbnail_filter_async(
+                video_path, cover_path, duration, start_frac=(frac or 0.08)
+            )
+        else:
+            await generate_single_thumbnail_async(video_path, cover_path, at=at)
+        stats = await loop.run_in_executor(None, _frame_score, cover_path)
+        if stats is None:
+            return cover_path
+        mean = stats[0]
+        if 8.0 <= mean <= 240.0:
+            if i:
+                logger.info(f"封面换点重试 {i} 次后可用: mean={mean:.1f} frac={frac}")
+            return cover_path
+        logger.warning(f"封面不合格: mean={mean:.1f} frac={frac}，换位置重试")
+    logger.warning("封面屡次不合格，保留最后一次结果")
+    return cover_path
+
+
+def _frame_score(path):
+    """返回 (亮度均值, 拉普拉斯方差, dHash, 32x18 灰度缩略)；失败返回 None。
+
+    320x180 灰度算亮度/清晰度，9x8 算 dHash，32x18 留给"是否重复"做
+    逐像素平均差 —— 只用 dHash 会在低细节画面上把不同时间点判成重复。
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+    try:
+        with Image.open(path) as im:
+            g = im.convert("L")
+            arr = np.asarray(g.resize((320, 180)), dtype=np.float32)
+            mean = float(arr.mean())
+            lap = (
+                arr[:-2, 1:-1] + arr[2:, 1:-1] + arr[1:-1, :-2] + arr[1:-1, 2:]
+                - 4.0 * arr[1:-1, 1:-1]
+            )
+            lap_var = float(lap.var())
+            a = np.asarray(g.resize((9, 8)), dtype=np.int16)
+            bits = (a[:, 1:] > a[:, :-1]).flatten()
+            thumb = np.asarray(g.resize((32, 18)), dtype=np.float32)
+        h = 0
+        for b in bits:
+            h = (h << 1) | int(b)
+        return mean, lap_var, h, thumb
+    except Exception:
+        return None
+
+
+def _hamming(a: int, b: int) -> int:
+    return bin(a ^ b).count("1")
+
+
+def _frame_ok(stats, accepted, *, blur_min=15.0, dark=8.0, bright=240.0,
+              dup_hamming=4, dup_mad=2.0):
+    """判定一帧是否可用：太黑/过曝/太糊/与已选帧重复。
+
+    重复判定要求 dHash 接近 **且** 逐像素平均差很小 —— 单靠 dHash 会把
+    静态画面里不同时刻的帧误判成重复（实测一条测试图样全被判重复）。
+    """
+    if stats is None:
+        return True, "unscored"      # 打分不可用时不因打分瘸腿而丢帧
+    mean, lap_var, h, thumb = stats
+    if mean < dark:
+        return False, f"black(mean={mean:.1f})"
+    if mean > bright:
+        return False, f"overexposed(mean={mean:.1f})"
+    if lap_var < blur_min:
+        return False, f"blurry(lap={lap_var:.1f})"
+    for st in accepted:
+        if _hamming(h, st[2]) <= dup_hamming:
+            mad = float(abs(thumb - st[3]).mean())
+            if mad < dup_mad:
+                return False, f"duplicate(h={_hamming(h, st[2])},mad={mad:.2f})"
+    return True, "ok"
+
+
+async def _generate_thumbnail_validated(t_video_path, thumb_path, cover_path,
+                                        vid_id, num, today, clean_name):
+    """legacy 抽帧 + 打分补采：任一格不合格就换时间点重抽（最多 3 次）。
+
+    只对已抽出的小图做 PIL/numpy 运算，没有额外解码开销；补采只针对
+    个别不合格的格子，正常情况下一个视频 0 次补采。
+    """
+    job_id = uuid.uuid4().hex
+    temp_dir = Path("temp") / f"thumb_{job_id}"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    thumb_id = os.path.join(thumb_path, f"{vid_id}.jpg")
+    cover_id = os.path.join(cover_path, f"{vid_id}.jpg")
+    mini_thumb_id = os.path.join(cover_path, f"{vid_id}_thumb.jpg")
+    os.makedirs(thumb_path, exist_ok=True)
+    os.makedirs(cover_path, exist_ok=True)
+
+    try:
+        duration, width, height, duration_str = await get_video_info_async(t_video_path)
+        is_vertical = width < height
+        count = 4 if is_vertical else 6
+        times = [duration * i / (count + 1) for i in range(1, count + 1)]
+        frame_paths = [str(temp_dir / f"{i}.jpg") for i in range(count)]
+
+        await asyncio.gather(*[
+            extract_frame_async(t_video_path, t, p) for t, p in zip(times, frame_paths)
+        ])
+
+        loop = asyncio.get_running_loop()
+        accepted: list[tuple] = []
+        repairs = 0
+        for i, (path, t0) in enumerate(zip(frame_paths, times)):
+            stats = await loop.run_in_executor(None, _frame_score, path)
+            good, why = _frame_ok(stats, accepted)
+            if not good:
+                # 偏移要够大才跳得出去：一条 40s 片子的前 15s 全黑，
+                # 只挪 ±2s 会一直落在黑场里（实测 3 次全失败）。
+                for frac in (0.05, -0.05, 0.15, -0.15, 0.35, 0.5):
+                    t2 = t0 + duration * frac
+                    t2 = min(max(t2, duration * 0.03), duration * 0.97)
+                    repairs += 1
+                    if not await extract_frame_async(t_video_path, t2, path):
+                        continue
+                    stats = await loop.run_in_executor(None, _frame_score, path)
+                    good, why = _frame_ok(stats, accepted)
+                    if good:
+                        logger.info(
+                            f"thumb 补采成功: vid={vid_id} idx={i} "
+                            f"t={t0:.1f}→{t2:.1f}s"
+                        )
+                        break
+            if not good:
+                logger.warning(f"thumb 补采未成功: vid={vid_id} idx={i} 原因={why}")
+            if stats:
+                accepted.append(stats)
+
+        valid_frames = [p for p in frame_paths if os.path.exists(p)]
+        if len(valid_frames) < count:
+            logger.warning(
+                f"generate_thumbnail(validated): only {len(valid_frames)}/{count} "
+                f"frames for vid_id={vid_id}"
+            )
+            return None
+
+        await _make_cover(t_video_path, cover_id, duration)
+        if os.path.exists(cover_id):
+            await generate_mini_thumb_async(cover_id, mini_thumb_id)
+
+        info_dict = {"num": num, "today": today, "name": clean_name, "str": duration_str}
+        await loop.run_in_executor(
+            None, _draw_logic_sync, frame_paths, thumb_id, is_vertical, info_dict
+        )
+        await loop.run_in_executor(None, stitch_cover, count, thumb_id, cover_id)
+        if repairs:
+            logger.info(f"thumb validated: vid={vid_id} 补采 {repairs} 次")
+        return True
+    except Exception as e:
+        logger.error(f"生成预览图失败(validated): {e}")
+        return False
+    finally:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
 
 
 def _draw_logic_sync(frames, thumb_path, is_vertical, info_dict, pre_tiled=False):
@@ -647,7 +859,7 @@ async def _generate_thumbnail_tiled(t_video_path, thumb_path, cover_path,
             )
             return None
 
-        await generate_single_thumbnail_async(t_video_path, cover_id)
+        await _make_cover(t_video_path, cover_id, duration)
         if os.path.exists(cover_id):
             await generate_mini_thumb_async(cover_id, mini_thumb_id)
         else:
@@ -673,6 +885,10 @@ async def generate_thumbnail(t_video_path: str, thumb_path: str,cover_path, vid_
         return 0
     if THUMB_ENGINE in ("keyframe", "select"):
         return await _generate_thumbnail_tiled(
+            t_video_path, thumb_path, cover_path, vid_id, num, today, clean_name
+        )
+    if THUMB_ENGINE == "validated":
+        return await _generate_thumbnail_validated(
             t_video_path, thumb_path, cover_path, vid_id, num, today, clean_name
         )
     # 1. 创建唯一的临时工作目录，彻底避免并发冲突
@@ -720,7 +936,7 @@ async def generate_thumbnail(t_video_path: str, thumb_path: str,cover_path, vid_
             )
             return None
         # 6. 抽取单张封面
-        await generate_single_thumbnail_async(t_video_path, cover_id)
+        await _make_cover(t_video_path, cover_id, duration)
 
         if os.path.exists(cover_id):
             await generate_mini_thumb_async(cover_id, mini_thumb_id)

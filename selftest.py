@@ -210,6 +210,7 @@ async def run(args) -> int:
     from utils import pic_utils
 
     pic_utils.THUMB_ENGINE = args.engine
+    pic_utils.COVER_ENGINE = args.cover_engine
 
     db_path = work / "selftest-bot.db"
     print(f"工作目录 : {work}")
@@ -414,7 +415,9 @@ def main() -> int:
     ap.add_argument("--items", type=int, default=5, help="抓几条（默认 5，与生产一个批次相同）")
     ap.add_argument("--source", default="iwara", choices=["iwara"], help="暂只支持 iwara")
     ap.add_argument("--thumb-mode", default="legacy", choices=["legacy", "xstack", "keyframe", "keyframe-spread"])
-    ap.add_argument("--engine", default="legacy", choices=["legacy", "keyframe", "select"],
+    ap.add_argument("--cover-engine", default="legacy", choices=["legacy", "thumbnail"],
+                    help="封面引擎（对应 COVER_ENGINE）")
+    ap.add_argument("--engine", default="legacy", choices=["legacy", "keyframe", "select", "validated"],
                     help="生产引擎开关（对应 utils.pic_utils.THUMB_ENGINE）")
     ap.add_argument("--workdir", default=None, help="指定工作目录（默认 mktemp）")
     ap.add_argument("--keep", action="store_true", help="保留产物供人工审查")
