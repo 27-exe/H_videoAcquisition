@@ -351,20 +351,30 @@ async def extract_tile_keyframe_spread_async(video_path, duration, out_path,
 
 
 async def _make_cover(video_path: str, cover_path: str, duration: float | None = None):
-    """生成封面并校验：整段都黑/过曝就换位置重试。
+    """生成封面并校验；首轮取点按片长自适应，不合格就换位置重试。
 
-    thumbnail 滤镜只保证"批内最典型"，如果窗口整段是黑场它照样返回黑帧
-    （实测 40s 片子前 15s 全黑、窗口 3.2–8.2s，两种引擎都拿到亮度 0.0）。
-    所以封面也要打分，不合格就按 30%/50%/75% 换点重来。
+    首轮时间点 = clamp(max(7, 8% × 时长), ..., 50% 时长)：
+      * 用 max(7, …) 而不是固定 7s —— 16 分钟的视频 7s 只到 0.7%，基本还是
+        片头/开场，8% 落在 77s 才是正文；
+      * 也不能纯用 8% —— 40 秒短片 8% 只有 3.2s，比 7s 更靠前，更容易撞上
+        淡入黑场。两个下限取大值就同时避免这两种情况。
+    thumbnail 滤镜本身只保证"批内最典型"，窗口整段是黑场时照样返回黑帧
+    （实测 40s 片子前 15s 全黑、亮度 0.0），所以两种引擎都要校验。
     """
     d = float(duration or 0)
-    fracs = [0.08, 0.30, 0.50, 0.75] if d else [None]
+    first_at = None
+    if d:
+        first_at = min(max(7.0, d * 0.08), d * 0.5)
+    points = [first_at] + ([d * 0.30, d * 0.50, d * 0.75] if d else [])
+
     loop = asyncio.get_running_loop()
-    for i, frac in enumerate(fracs):
-        at = d * frac if (d and frac is not None) else None
+    for i, at in enumerate(points):
         if COVER_ENGINE == "thumbnail":
+            frac = 0.08
+            if i and d and at is not None:
+                frac = at / d
             await generate_cover_thumbnail_filter_async(
-                video_path, cover_path, duration, start_frac=(frac or 0.08)
+                video_path, cover_path, duration, start_frac=frac
             )
         else:
             await generate_single_thumbnail_async(video_path, cover_path, at=at)
@@ -374,9 +384,13 @@ async def _make_cover(video_path: str, cover_path: str, duration: float | None =
         mean = stats[0]
         if 8.0 <= mean <= 240.0:
             if i:
-                logger.info(f"封面换点重试 {i} 次后可用: mean={mean:.1f} frac={frac}")
+                logger.info(
+                    f"封面换点重试 {i} 次后可用: mean={mean:.1f} at={at if at is None else round(at,1)}s"
+                )
             return cover_path
-        logger.warning(f"封面不合格: mean={mean:.1f} frac={frac}，换位置重试")
+        logger.warning(
+            f"封面不合格: mean={mean:.1f} at={'-' if at is None else round(at, 1)}s，换位置重试"
+        )
     logger.warning("封面屡次不合格，保留最后一次结果")
     return cover_path
 
