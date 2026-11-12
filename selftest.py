@@ -251,6 +251,16 @@ async def run(args) -> int:
             print("❌ 一个都没下下来，终止")
             return 3
 
+        # 2.5) 关键帧统计：GOP 间隔决定"只解关键帧"方案会不会被迫重复用帧
+        kf = {}
+        for vid, p in zip(ids, paths):
+            if p:
+                kf[vid] = await pic_utils.keyframe_stats(p)
+        report["keyframes"] = kf
+        for vid, st in list(kf.items())[:5]:
+            print(f"   关键帧 {vid}: n={st['count']} first={st.get('first')}s "
+                  f"max_gap={st['max_gap']}s")
+
         # 3) 缩略图（被测环节）—— generate_thumbnail 成功返回 True，失败返回 False/None
         t0 = time.time()
         date = "2026-11-12"
@@ -404,7 +414,7 @@ def main() -> int:
     ap.add_argument("--items", type=int, default=5, help="抓几条（默认 5，与生产一个批次相同）")
     ap.add_argument("--source", default="iwara", choices=["iwara"], help="暂只支持 iwara")
     ap.add_argument("--thumb-mode", default="legacy", choices=["legacy", "xstack", "keyframe", "keyframe-spread"])
-    ap.add_argument("--engine", default="legacy", choices=["legacy", "keyframe"],
+    ap.add_argument("--engine", default="legacy", choices=["legacy", "keyframe", "select"],
                     help="生产引擎开关（对应 utils.pic_utils.THUMB_ENGINE）")
     ap.add_argument("--workdir", default=None, help="指定工作目录（默认 mktemp）")
     ap.add_argument("--keep", action="store_true", help="保留产物供人工审查")
