@@ -49,6 +49,41 @@ def add_hanime1(scheduler: AsyncIOScheduler,client,db) -> Job:
     )
 
 
+def add_daily_sweep(scheduler: AsyncIOScheduler) -> Job:
+    """加入每天 05:00 的下载目录清扫(2026-11-12)
+
+    清掉硬杀遗留的孤儿 .aria2 控制文件与烂尾 partial。
+    竞赛安全由 sweeper 内部的 RPC 活跃检查 + 24h 年龄阈值保证。
+    """
+    from pipelines.aria2_sweeper import sweep_orphan_downloads
+    return scheduler.add_job(
+        sweep_orphan_downloads,
+        trigger=CronTrigger(hour=5, minute=0, timezone="Asia/Shanghai"),
+        id="daily_aria2_sweep",
+        name="每日下载目录清扫 - 05:00",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+
+def add_daily_thumb_sweep(scheduler: AsyncIOScheduler, db) -> Job:
+    """加入每天 05:15 的缩略图 TTL 清扫(2026-11-12)
+
+    按 db 的 last_sent_date 删除超过 THUMB_TTL_DAYS(默认 21 天)
+    未被发送的 cover/preview 文件。
+    """
+    from pipelines.thumb_sweeper import sweep_old_thumbs
+    return scheduler.add_job(
+        sweep_old_thumbs,
+        args=(db,),
+        trigger=CronTrigger(hour=5, minute=15, timezone="Asia/Shanghai"),
+        id="daily_thumb_sweep",
+        name="每日缩略图 TTL 清扫 - 05:15",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+
 class TaskManager:
     """
     只负责调度控制：启动 / 暂停 / 立即执行一次
@@ -58,6 +93,8 @@ class TaskManager:
         self.scheduler_started = False
         self.iwara: Job | None = None
         self.hanime1: Job | None = None
+        self.sweep: Job | None = None
+        self.thumb_sweep: Job | None = None
         self.client = client
         self.db = db
 
@@ -70,6 +107,8 @@ class TaskManager:
 
         self.iwara = add_iwara(self.scheduler,self.client,self.db)
         self.hanime1 = add_hanime1(self.scheduler,self.client,self.db)
+        self.sweep = add_daily_sweep(self.scheduler)
+        self.thumb_sweep = add_daily_thumb_sweep(self.scheduler, self.db)
 
         self.scheduler.start()
         self.scheduler_started = True
@@ -77,6 +116,8 @@ class TaskManager:
         logger.info("定时器")
         logger.info("  • iwara : 每天 14:00")
         logger.info("  • hanime1 : 每隔一天 16:00")
+        logger.info("  • sweep : 每天 05:00")
+        logger.info("  • thumb_sweep : 每天 05:15")
 
     def pause_hanime1(self):
         if self.hanime1:

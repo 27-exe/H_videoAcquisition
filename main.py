@@ -101,6 +101,26 @@ async def main():
         ts.start_all()
         logger.info("scheduler auto-installed by systemd (no /update needed)")
 
+        # 2026-11-12: 启动时清扫 download/ 下的孤儿 .aria2 与烂尾 partial ——
+        # 硬杀(watchdog SIGKILL/OOM/systemd stop)时 _single_download 末尾的
+        # 清理不会跑,aria2 又为续传保留控制文件,日积月累拖满磁盘
+        # (实测 2414 个控制文件 + 16 个共 3.01GB partial,横跨 23 天)。
+        try:
+            from pipelines.aria2_sweeper import sweep_orphan_downloads
+            sweep_stats = await sweep_orphan_downloads()
+            logger.info("启动清扫完成: %s", sweep_stats)
+        except Exception as e:
+            logger.warning("启动清扫失败(不影响主流程): %s", e)
+
+        # 2026-11-12: 缩略图 TTL 清扫 —— cover/preview 每视频两个文件、
+        # 发送后不删(跨天复发需要),按 last_sent_date 超 TTL 才清。
+        try:
+            from pipelines.thumb_sweeper import sweep_old_thumbs
+            thumb_stats = await sweep_old_thumbs(db)
+            logger.info("缩略图清扫完成: %s", thumb_stats)
+        except Exception as e:
+            logger.warning("缩略图清扫失败(不影响主流程): %s", e)
+
         # 2026-09-10 临时:如果 RUN_DO_IWARA_ON_BOOT=1,启动后立即跑一次 do_iwara
         # 用于调试;默认不启用。完成调试后请 unset 此 env 变量。
         if os.environ.get("RUN_DO_IWARA_ON_BOOT") == "1":

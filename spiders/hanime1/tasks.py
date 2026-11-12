@@ -196,7 +196,7 @@ async def do_hanime1(client, db: DataBase, max_retries: int = 3, retry_wait_minu
                             ch_id = await send_source_video(client=client, title=ti, path=vid_path, ch_id=video_ch,
                                                            mini_thumb_path=mini_path, semaphore=send_semaphore)
                             if ch_id != 0:
-                                await db.insert_hanime1_info(v_id, ti, ch_id)
+                                await db.insert_hanime1_info(v_id, ti, ch_id, last_sent_date=date)
 
                         video_batch_ids.append(ch_id)
                         video_ch_ids.append(ch_id)
@@ -218,6 +218,12 @@ async def do_hanime1(client, db: DataBase, max_retries: int = 3, retry_wait_minu
                                        title=tit, ch_name=vid_name, ch_id=ch__id)
                         if preview_msg_id != 0:
                             preview_ch_ids.append(preview_msg_id)
+                            # 2026-11-12: 记录最后发送日期 —— 缩略图 TTL 清理的依据,
+                            # 跨天复发的视频每次发送都会续期
+                            try:
+                                await db.update_hanime1_last_sent(vid, date)
+                            except Exception as e:
+                                logger.warning(f"update_hanime1_last_sent 失败 vid={vid}: {e}")
 
                 # 检查本轮是否成功发送了30条消息
                 successful_preview_count = len([msg_id for msg_id in preview_ch_ids if msg_id != 0])
@@ -261,6 +267,12 @@ async def do_hanime1(client, db: DataBase, max_retries: int = 3, retry_wait_minu
                 rank_list = [f'https://t.me/{vid_name}/{video_id}' for video_id in video_ch_ids if video_id != 0][::-1]
                 cover_paths = [os.path.join(cover_path, f"{video_id}.jpg") for video_id in id_lists[-5:]][::-1]
                 await send_top5(client, ch_id=pic_ch, ranks=rank_list, source='hanime1', paths=cover_paths)
+                # Top5 封面也算"发送",续期最后发送日期(与预览更新互为兜底)
+                for _cid in id_lists[-5:]:
+                    try:
+                        await db.update_hanime1_last_sent(_cid, date)
+                    except Exception as e:
+                        logger.warning(f"update_hanime1_last_sent(top5) 失败 id={_cid}: {e}")
 
                 logger.info("=========== Hanime1 爬取任务完成 ===========")
                 return True

@@ -17,6 +17,23 @@ START_GRACE_S = float(os.environ.get("ARIA2_START_GRACE_S", "90"))
 STALL_CHECKS = int(os.environ.get("ARIA2_STALL_CHECKS", "5"))
 RETRY_SLEEP_S = float(os.environ.get("ARIA2_RETRY_SLEEP_S", "15"))
 
+
+def _safe_name(name: str) -> str:
+    """把视频标题变成安全的文件名组件。
+
+    2026-11-12: 标题里的 '/' 会被 os.path.join/aria2 当成路径分隔符,
+    '[Author] a/b' 直接炸出嵌套垃圾目录(实测 2302 个);控制字符与
+    尾部的点/空格同样会让 aria2 写出失败或产生隐藏文件。
+    只动文件系统路径,display 标题(日志/Telegram caption)保持原样。
+    """
+    s = "".join("_" if (ord(c) < 32 or c in "/\\") else c for c in name).strip(" .")
+    if not s:
+        s = "untitled"
+    b = s.encode("utf-8")
+    if len(b) > 250:  # ext4 单组件 255 字节上限,留 4 字节给扩展名
+        s = b[:250].decode("utf-8", "ignore")  # ignore 防截断出非法 UTF-8 尾
+    return s
+
 @asynccontextmanager
 async def aria2_session(uri: str, token: str):
 
@@ -43,20 +60,35 @@ async def _single_download(aria, url: str, dst: str, video_name: str, max_retrie
     # 可选：文件已存在直接跳过（防止重复下载）
     if os.path.exists(dst):
         existing_bytes = os.path.getsize(dst)
-        if existing_bytes > 0:
+        # 2026-11-12: 有 .aria2 控制文件 = 上次没下完(硬杀/断线遗留),
+        # 绝不能当成品用 —— 否则会把截断视频交给 Telegram 发送。
+        # 删掉数据+控制文件,交给 aria2 从头重下。
+        if os.path.exists(dst + ".aria2"):
+            logger.warning(
+                f"[{video_name}] 发现未完成下载(存在 .aria2 控制文件),"
+                f"清理后重新下载 -> {dst}"
+            )
+            try:
+                os.remove(dst)
+                os.remove(dst + ".aria2")
+            except OSError as e:
+                logger.error(f"[{video_name}] 清理未完成下载失败: {e}")
+                return 0
+        elif existing_bytes > 0:
             logger.info(
                 f"[{video_name}] 文件已存在 ({existing_bytes} bytes)，跳过下载 -> {dst}"
             )
             return dst
-        # 0-byte stub left over from a failed attempt; let aria2 overwrite it
-        logger.warning(
-            f"[{video_name}] \u53d1\u73b0 0-byte \u5e7b\u4f4d\u6587\u4ef6\uff0c\u5220\u9664\u540e\u91cd\u8bd5 -> {dst}"
-        )
-        try:
-            os.remove(dst)
-        except OSError as e:
-            logger.error(f"[{video_name}] \u5220\u9664 0-byte \u6587\u4ef6\u5931\u8d25: {e}")
-            return 0
+        else:
+            # 0-byte stub left over from a failed attempt; let aria2 overwrite it
+            logger.warning(
+                f"[{video_name}] \u53d1\u73b0 0-byte \u5e7b\u4f4d\u6587\u4ef6\uff0c\u5220\u9664\u540e\u91cd\u8bd5 -> {dst}"
+            )
+            try:
+                os.remove(dst)
+            except OSError as e:
+                logger.error(f"[{video_name}] \u5220\u9664 0-byte \u6587\u4ef6\u5931\u8d25: {e}")
+                return 0
 
     # 2026-09-12 实测(iwara CDN = nginx):单文件 16 并发连接会被 server 端掐断 ——
     # 同一个 URL 用单连接 curl 29s 完整下完(156MB),而 aria2 -x16 会卡在 96-98%
@@ -200,8 +232,9 @@ async def start_batch_download(urls: list[str], download_dir: str, names: list[s
     async with aria2_session(rpc_url, rpc_token) as aria:
         tasks = []
         for url, name in zip(urls, names):
-            # 拼接下载路径
-            full_dst = os.path.join(download_dir, f"{name}.mp4")
+            # 拼接下载路径 —— 标题先过 _safe_name:里面的 '/' 会变成
+            # 路径分隔符炸出垃圾目录(2026-11-12 实测 2302 个)
+            full_dst = os.path.join(download_dir, f"{_safe_name(name)}.mp4")
             tasks.append(_single_download(aria, url, full_dst, name))
 
         # Real download is parallel via aria2's own concurrency; the
