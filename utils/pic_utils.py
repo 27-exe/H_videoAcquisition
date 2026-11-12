@@ -204,12 +204,89 @@ async def extract_tile_keyframe_async(video_path, out_path,
     return True
 
 
+async def extract_tile_select_async(video_path, duration, out_path,
+                                    cols, rows, cell_w, cell_h, count,
+                                    gap_hint=None):
+    """关键帧 + 时间间隔选择：只解关键帧，但用 select 按"距上一帧至少 gap"
+    挑真实存在的帧，再用 setpts 重排时间轴后 tile。
+
+    与 fps 版本的区别（fps 版本实测会出黑格 + 重复格）：
+      * 第一帧额外要求 t >= gap/4，避免取到片头的黑场/淡入帧；
+      * select 只放行真正解码出来的帧，不会像 fps 那样重复上一帧补点。
+
+    gap_hint 必须由调用方按实际关键帧密度给出：若按 duration/(count+1) 平均
+    间隔来要求，关键帧稀疏的视频（实测有一条 50s 只有 9 个关键帧）会凑不满
+    count 帧，tile 就只能把剩下的格子留成默认黑底。
+    """
+    gap = float(gap_hint) if gap_hint else max(duration, 1.0) / (count + 1)
+    start = gap * 0.25
+    vf = (
+        f"select='isnan(prev_selected_t)*gte(t\\,{start:.3f})"
+        f"+gte(t-prev_selected_t\\,{gap:.3f})',"
+        f"setpts=N/FRAME_RATE/TB,"
+        f"scale={cell_w}:{cell_h}:force_original_aspect_ratio=decrease,"
+        f"pad={cell_w}:{cell_h}:(ow-iw)/2:(oh-ih)/2:color=black,"
+        f"tile={cols}x{rows}"
+    )
+    cmd = [
+        'ffmpeg', '-threads', '1', '-loglevel', 'error', '-y',
+        '-skip_frame', 'nokey', '-i', video_path,
+        '-vf', vf, '-fps_mode', 'vfr', '-frames:v', '1', '-q:v', '2', out_path,
+    ]
+    async with _ffmpeg_slots():
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, err = await proc.communicate()
+    if proc.returncode != 0 or not os.path.exists(out_path):
+        logger.warning(f"extract_tile_select: rc={proc.returncode} {err.decode()[:300]}")
+        return False
+    return True
+
+
+async def keyframe_stats(video_path):
+    """诊断用：列出关键帧时间戳，算出数量与最大间隔。
+
+    关键帧间隔大于采样间隔时，任何"只解关键帧"的方案都会被迫重复用帧，
+    这正是 fps 变体出现重复格的根因。
+    """
+    cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+           '-skip_frame', 'nokey', '-show_entries', 'frame=pts_time',
+           '-of', 'csv=p=0', video_path]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+    )
+    out, _ = await proc.communicate()
+    times = []
+    for line in out.decode().splitlines():
+        line = line.strip().rstrip(',')
+        if not line:
+            continue
+        try:
+            times.append(float(line))
+        except ValueError:
+            pass
+    if not times:
+        return {"count": 0, "max_gap": None, "times": []}
+    gaps = [b - a for a, b in zip(times, times[1:])]
+    gaps_sorted = sorted(gaps)
+    median_gap = gaps_sorted[len(gaps_sorted) // 2] if gaps_sorted else None
+    return {
+        "count": len(times),
+        "max_gap": round(max(gaps), 2) if gaps else None,
+        "median_gap": round(median_gap, 2) if median_gap else None,
+        "first": round(times[0], 2),
+        "last": round(times[-1], 2),
+        "times": [round(t, 1) for t in times[:40]],
+    }
+
+
 async def extract_tile_keyframe_spread_async(video_path, duration, out_path,
                                              cols, rows, cell_w, cell_h, count):
-    """关键帧均匀取样：仍只解关键帧（1 个解码器），但用 fps 把时间轴
-    重采样成 count+1 个点，保证六个格子分布在整段影片上。
+    """关键帧 + fps 重采样（**已证有缺陷，仅留作对照**）。
 
-    代价是要从头扫到 6/7 处（只 demux + 解关键帧，不解全帧）。
+    实测缺陷：fps 会从 t=0 开始补点，导致首格取到片头黑场；关键帧间隔
+    大于采样间隔时 fps 会重复上一帧，出现两格完全相同。
     """
     interval = max(duration, 1.0) / (count + 1)
     vf = (
@@ -521,14 +598,14 @@ def write_text_on_image(image_path, top: int, date: str):
         logger.error(f"写入文字失败: {e}")
         return False
 
-async def _generate_thumbnail_keyframe(t_video_path, thumb_path, cover_path,
-                                       vid_id, num, today, clean_name):
-    """单进程 keyframe 引擎：1 次 ffmpeg 出整张宫格，再走原有的文字/封面合成。
+async def _generate_thumbnail_tiled(t_video_path, thumb_path, cover_path,
+                                    vid_id, num, today, clean_name):
+    """单进程 tile 引擎：1 次 ffmpeg 出整张宫格，再走原有的文字/封面合成。
 
+    THUMB_ENGINE=select 用 select 按时间间隔挑真实关键帧（推荐）；
+    THUMB_ENGINE=keyframe 用 fps 重采样（对照用，已知会出黑格/重复格）。
     与 legacy 的差别只在抽帧：legacy 每个时间点起一个 ffmpeg（共 6 个），
-    这里用 -skip_frame nokey 只解关键帧（1 个解码器），再用 fps 把时间轴
-    重采样成 6 个点，保证六格分布在整段影片上。
-    """
+    这里整个视频只起 1 个解码器。"""
     job_id = uuid.uuid4().hex
     temp_dir = Path("temp") / f"thumb_{job_id}"
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -548,9 +625,21 @@ async def _generate_thumbnail_keyframe(t_video_path, thumb_path, cover_path,
         cell_h = ((1920 - 384) if is_vertical else (1080 - 360)) // rows
 
         grid_path = str(temp_dir / "grid.jpg")
-        ok = await extract_tile_keyframe_spread_async(
-            t_video_path, duration, grid_path, cols, rows, cell_w, cell_h, count
-        )
+        if THUMB_ENGINE == "select":
+            # 用实际关键帧密度决定采样间隔：平均间隔 D/(count+1) 在关键帧稀疏的
+            # 视频上凑不满 count 帧，tile 会把剩余格子留成黑底。
+            st = await keyframe_stats(t_video_path)
+            avg = max(duration, 1.0) / (count + 1)
+            med = st.get("median_gap") or avg
+            gap = 0.9 * min(avg, med)
+            ok = await extract_tile_select_async(
+                t_video_path, duration, grid_path, cols, rows, cell_w, cell_h,
+                count, gap_hint=gap,
+            )
+        else:
+            ok = await extract_tile_keyframe_spread_async(
+                t_video_path, duration, grid_path, cols, rows, cell_w, cell_h, count
+            )
         if not ok:
             logger.warning(
                 f"generate_thumbnail(keyframe): 拼图失败 vid_id={vid_id} "
@@ -582,8 +671,8 @@ async def _generate_thumbnail_keyframe(t_video_path, thumb_path, cover_path,
 async def generate_thumbnail(t_video_path: str, thumb_path: str,cover_path, vid_id,num, today, clean_name):
     if t_video_path == 0:
         return 0
-    if THUMB_ENGINE == "keyframe":
-        return await _generate_thumbnail_keyframe(
+    if THUMB_ENGINE in ("keyframe", "select"):
+        return await _generate_thumbnail_tiled(
             t_video_path, thumb_path, cover_path, vid_id, num, today, clean_name
         )
     # 1. 创建唯一的临时工作目录，彻底避免并发冲突
